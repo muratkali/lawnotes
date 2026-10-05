@@ -1,0 +1,57 @@
+#!/bin/bash
+# lawnotes: open the Law Notes editor.
+#   lawnotes                 pick a note (inside herdr: in a new pane beside this one)
+#   lawnotes Tort/Duty       open or create ~/UCL/notes/Tort/Duty.md
+#   lawnotes --here [note]   open in this terminal, even inside herdr
+#   lawnotes --update        update to the latest version from GitHub
+#   lawnotes --version       show the installed version
+SELF="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$0")"
+DIR="$(dirname "$SELF")"
+
+mode=auto
+case "$1" in
+  -h|--help) sed -n '2,7p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -V|--version) exec python3 "$DIR/lawnotes.py" --version ;;
+  --update) exec bash "$DIR/install.sh" --update ;;
+  --here) shift; exec python3 "$DIR/lawnotes.py" "$@" ;;
+  --app) shift; mode=app ;;  # used by Law Notes.app
+esac
+
+# Files that exist relative to where you ran this become absolute paths, because a new
+# pane starts elsewhere; anything else is a note name inside the notes folder.
+args=()
+for a in "$@"; do
+  if [ -e "$a" ]; then args+=("$(cd "$(dirname "$a")" && pwd)/$(basename "$a")"); else args+=("$a"); fi
+done
+
+# Which herdr pane to open beside: this one, or (from the app) whichever pane is focused.
+pane=""
+if command -v herdr >/dev/null 2>&1; then
+  if [ "$mode" = app ]; then
+    pane=$(herdr pane list 2>/dev/null | python3 -c '
+import json, sys
+try:
+    focused = [p["pane_id"] for p in json.load(sys.stdin)["result"]["panes"] if p.get("focused")]
+    print(focused[0])
+except Exception:
+    sys.exit(1)') || pane=""
+  elif [ -n "$HERDR_PANE_ID" ]; then
+    pane="$HERDR_PANE_ID"
+  fi
+fi
+
+if [ -n "$pane" ]; then
+  quoted=""
+  [ ${#args[@]} -gt 0 ] && quoted=$(printf "%q " "${args[@]}")
+  new=$(herdr pane split "$pane" --direction right --ratio 0.5 --focus --cwd "$HOME" \
+        | python3 -c 'import json, sys; print(json.load(sys.stdin)["result"]["pane"]["pane_id"])') && \
+  herdr pane run "$new" "python3 '$DIR/lawnotes.py' $quoted || read -r -p 'Press Enter to close this pane. '; exit" >/dev/null && {
+    [ "$mode" = app ] && open -a Terminal
+    exit 0
+  }
+fi
+
+if [ "$mode" = app ]; then
+  exec open -a Terminal "$DIR/app/Law Notes.command"  # no herdr: a new Terminal window
+fi
+exec python3 "$DIR/lawnotes.py" "${args[@]}"
