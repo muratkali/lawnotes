@@ -1,0 +1,230 @@
+"""Editor tests: the buffer, saving, highlighting, and a real session in a pseudo-terminal.
+
+Run: python3 -m unittest discover -s tests -v
+Uses only temporary folders; never touches your notes, history or install.
+"""
+import json
+import os
+import pty
+import re
+import select
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TMP = tempfile.mkdtemp(prefix="lawnotes-tests-")
+os.environ.update(LAWNOTES_DIR=os.path.join(TMP, "notes"), LAWNOTES_HISTORY=os.path.join(TMP, "history.git"),
+                  LAWNOTES_SPELL="0", LAWNOTES_NO_UPDATE="1", HOME=os.path.join(TMP, "home"))
+os.makedirs(os.environ["HOME"], exist_ok=True)
+sys.path.insert(0, ROOT)
+import lawnotes  # noqa: E402  (after the environment above)
+
+
+class BufferTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(dir=TMP)
+        self.path = os.path.join(self.dir, "Tort", "Duty.md")
+
+    def test_list_continues_and_ends(self):
+        b = lawnotes.Buffer(self.path)
+        b.insert("- first")
+        b.newline()
+        b.insert("second")
+        b.newline()
+        b.newline()  # Enter on an empty bullet ends the list
+        self.assertEqual(b.lines, ["- first", "- second", ""])
+
+    def test_numbered_list_and_shift_enter(self):
+        b = lawnotes.Buffer(self.path)
+        b.insert("1. offer")
+        b.newline(plain=True)
+        b.insert("unilateral")
+        b.newline()
+        self.assertEqual(b.lines, ["1. offer", "   unilateral", "2. "])
+
+    def test_undo_steps(self):
+        b = lawnotes.Buffer(self.path)
+        b.insert("alpha")
+        b.newline()
+        b.insert("beta")
+        b.cy, b.cx = 0, 5  # move away, then type: a separate undo step
+        b.insert("!")
+        b.undo()
+        self.assertEqual(b.lines, ["alpha", "beta"])
+
+    def test_save_round_trip_and_undo(self):
+        b = lawnotes.Buffer(self.path)
+        b.insert("Donoghue v Stevenson")
+        b.save()
+        self.assertEqual(open(self.path).read(), "Donoghue v Stevenson\n")
+        b.insert(" [1932] AC 562")
+        self.assertTrue(b.undo())
+        self.assertEqual(b.lines, ["Donoghue v Stevenson"])
+
+    def test_conflict_copy_never_overwrites(self):
+        b = lawnotes.Buffer(self.path)
+        b.insert("mine")
+        b.save()
+        time.sleep(0.02)
+        with open(self.path, "w") as f:
+            f.write("from another Mac\n")
+        b.insert(" more")
+        note = b.save()
+        self.assertIn("changed elsewhere", note)
+        self.assertEqual(open(self.path).read(), "from another Mac\n")
+        self.assertIn("conflict", b.path)
+        self.assertEqual(open(b.path).read(), "mine more\n")
+
+    def test_failed_save_raises_and_keeps_text(self):
+        b = lawnotes.Buffer(os.path.join(self.dir, "ro", "n.md"))
+        os.makedirs(os.path.dirname(b.path))
+        os.chmod(os.path.dirname(b.path), 0o500)
+        try:
+            b.insert("keep me")
+            with self.assertRaises(OSError):
+                b.save()
+            self.assertEqual(b.lines, ["keep me"])
+            self.assertTrue(b.dirty)
+        finally:
+            os.chmod(os.path.dirname(b.path), 0o700)
+
+    def test_encodings_and_control_characters(self):
+        p = os.path.join(self.dir, "w.md")
+        with open(p, "wb") as f:
+            f.write("Lord Atkin’s “neighbour”".encode("cp1252") + b"\x00x")
+        b = lawnotes.Buffer(p)
+        self.assertEqual(b.lines, ["Lord Atkin’s “neighbour”�x"])
+        self.assertIn("Windows-1252", b.note)
+
+    def test_symlinked_note_stays_a_link(self):
+        real = os.path.join(self.dir, "real.md")
+        open(real, "w").write("a\n")
+        link = os.path.join(self.dir, "link.md")
+        os.symlink(real, link)
+        b = lawnotes.Buffer(link)
+        b.insert("b")
+        b.save()
+        self.assertTrue(os.path.islink(link))
+        self.assertEqual(open(real).read(), "ba\n")
+
+
+class TextTests(unittest.TestCase):
+    def test_paste_keeps_special_spaces(self):
+        self.assertEqual(lawnotes.clean_text("v Stevenson [1932] AC\r\n562\x07"), "v Stevenson [1932] AC\n562")
+
+    def test_case_and_citation_patterns(self):
+        cases = lambda s: [m.group() for m in lawnotes.CASE_RE.finditer(s)]
+        self.assertEqual(cases("Lord Atkin in Donoghue v Stevenson"), ["Donoghue v Stevenson"])
+        self.assertEqual(cases("Caparo Industries plc v Dickman"), ["Caparo Industries plc v Dickman"])
+        self.assertEqual(cases("R v Brown and Re Polemis"), ["R v Brown", "Re Polemis"])
+        self.assertEqual([m.group() for m in lawnotes.CITE_RE.finditer("[2019] EWCA Civ 1234")], ["[2019] EWCA Civ 1234"])
+        self.assertEqual([m.group() for m in lawnotes.STATUTE_RE.finditer("s 2(1) of the Human Rights Act 1998")],
+                         ["s 2(1)", "Human Rights Act 1998"])
+
+    def test_wrap(self):
+        self.assertEqual(lawnotes.wrap_starts("hello world foo", 8), (0, 6, 12))
+        self.assertEqual(lawnotes.wrap_starts("x" * 20, 8), (0, 8, 16))
+
+    def test_resolve_note(self):
+        self.assertEqual(lawnotes.resolve_note("Tort/Duty"), os.path.join(lawnotes.NOTES_DIR, "Tort", "Duty.md"))
+
+    def test_self_test_passes(self):
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "lawnotes.py"), "--self-test"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+class Session:
+    """The editor running in a pseudo-terminal, driven by keystrokes."""
+
+    def __init__(self, *args, env=None):
+        self.pid, self.fd = pty.fork()
+        if self.pid == 0:
+            os.environ.update(TERM="xterm-256color", **(env or {}))
+            os.execv(sys.executable, [sys.executable, os.path.join(ROOT, "lawnotes.py"), *args])
+        import fcntl
+        import termios
+        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+        self.out = self.read(2)
+
+    def read(self, seconds=0.4):
+        out, end = b"", time.time() + seconds
+        while time.time() < end:
+            if select.select([self.fd], [], [], 0.02)[0]:
+                try:
+                    out += os.read(self.fd, 65536)
+                except OSError:
+                    break
+        return out
+
+    def keys(self, data, seconds=0.4):
+        try:
+            os.write(self.fd, data)
+        except OSError:
+            pass
+        out = self.read(seconds)
+        self.out += out
+        return re.sub(rb"\x1b\[[0-9;?<>]*[A-Za-z~]|\x1b\(B|\x1b[=>]", b" ", out).decode(errors="replace")
+
+    def quit(self):
+        self.keys(b"\x11", 1.5)
+        for _ in range(30):
+            if os.waitpid(self.pid, os.WNOHANG)[0] == self.pid:
+                return True
+            time.sleep(0.1)
+        os.kill(self.pid, 9)
+        os.waitpid(self.pid, 0)
+        return False
+
+
+class SessionTests(unittest.TestCase):
+    def test_type_save_quit(self):
+        s = Session("Contract/Offer")
+        path = os.path.join(lawnotes.NOTES_DIR, "Contract", "Offer.md")
+        s.keys(b"\x1bOB\x1bOB- Offer: Carlill v Carbolic Smoke Ball Co", 0.5)
+        s.keys(b"\x1b[27;2;13~unilateral\r\r", 0.5)
+        running = json.load(open(lawnotes.RUNNING_FILE))
+        self.assertEqual(running["pid"], s.pid)
+        self.assertTrue(s.quit())
+        self.assertEqual(open(path).read(), "# Offer\n\n- Offer: Carlill v Carbolic Smoke Ball Co\n  unilateral\n\n")
+        self.assertFalse(os.path.exists(lawnotes.RUNNING_FILE))
+        self.assertNotIn(b"Traceback", s.out)
+
+    def test_open_request_and_outside_change(self):
+        folder = os.path.join(lawnotes.NOTES_DIR, "Req")
+        a, b = os.path.join(folder, "A.md"), os.path.join(folder, "B.md")
+        os.makedirs(folder, exist_ok=True)
+        open(a, "w").write("# A\n")
+        open(b, "w").write("# B\n")
+        s = Session(a)
+        with open(lawnotes.REQUEST_FILE, "w") as f:
+            json.dump({"note": "Req/B", "time": time.time()}, f)
+        s.keys(b"", 1.5)  # the launcher's request opens B
+        time.sleep(0.05)
+        open(b, "w").write("# B\n\nfrom another Mac\n")
+        screen = s.keys(b"", 1.5)
+        self.assertIn("reloaded", screen)
+        s.keys(b"\x1bOB\x1bOB\x05!\x13", 0.6)
+        self.assertTrue(s.quit())
+        self.assertEqual(open(b).read(), "# B\n\nfrom another Mac!\n")
+        self.assertEqual(sorted(os.listdir(folder)), ["A.md", "B.md"])  # no conflict copy
+
+    def test_history_snapshots_notes_only(self):
+        d = os.path.join(lawnotes.NOTES_DIR, "Hist")
+        os.makedirs(d, exist_ok=True)
+        open(os.path.join(d, "Note.md"), "w").write("# Note\n")
+        open(os.path.join(d, "lecture.pdf"), "wb").write(b"%PDF" + b"0" * 1000)
+        s = Session(os.path.join(d, "Note.md"))
+        self.assertTrue(s.quit())
+        files = subprocess.run(["git", f"--git-dir={lawnotes.HISTORY_DIR}", "ls-tree", "-r", "--name-only", "HEAD"],
+                               capture_output=True, text=True).stdout.split()
+        self.assertIn("Hist/Note.md", files)
+        self.assertNotIn("Hist/lecture.pdf", files)
+
+
+if __name__ == "__main__":
+    unittest.main()

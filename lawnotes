@@ -1,57 +1,162 @@
-#!/bin/bash
-# lawnotes: open the Law Notes editor.
-#   lawnotes                 pick a note (inside herdr: in a new pane beside this one)
-#   lawnotes Tort/Duty       open or create ~/UCL/notes/Tort/Duty.md
-#   lawnotes --here [note]   open in this terminal, even inside herdr
-#   lawnotes --update        update to the latest version from GitHub
-#   lawnotes --version       show the installed version
-SELF="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$0")"
-DIR="$(dirname "$SELF")"
+#!/usr/bin/env python3
+"""lawnotes: open the Law Notes editor.
 
-mode=auto
-case "$1" in
-  -h|--help) sed -n '2,7p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
-  -V|--version) exec python3 "$DIR/lawnotes.py" --version ;;
-  --update) exec bash "$DIR/install.sh" --update ;;
-  --here) shift; exec python3 "$DIR/lawnotes.py" "$@" ;;
-  --app) shift; mode=app ;;  # used by Law Notes.app
-esac
+    lawnotes [note]            open Law Notes; inside herdr in a "Notes" tab, otherwise here
+    lawnotes --window [note]   in the dedicated Law Notes window (what the app does)
+    lawnotes --split [note]    in a new herdr pane beside this one
+    lawnotes --here [note]     in this terminal
+    lawnotes --update          install the newest signed release now
+    lawnotes --rollback        go back to the previous version
+    lawnotes --version         show the installed version
+    lawnotes --uninstall       remove Law Notes (your notes stay)
 
-# Files that exist relative to where you ran this become absolute paths, because a new
-# pane starts elsewhere; anything else is a note name inside the notes folder.
-args=()
-for a in "$@"; do
-  if [ -e "$a" ]; then args+=("$(cd "$(dirname "$a")" && pwd)/$(basename "$a")"); else args+=("$a"); fi
-done
+A note is a name inside the notes folder (Tort/Duty) or a file path. If Law Notes is
+already open, the launcher brings that copy forward (and opens the note there) instead
+of starting a second one, so the same note is never edited in two places.
+"""
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import time
 
-# Which herdr pane to open beside: this one, or (from the app) whichever pane is focused.
-pane=""
-if command -v herdr >/dev/null 2>&1; then
-  if [ "$mode" = app ]; then
-    pane=$(herdr pane list 2>/dev/null | python3 -c '
-import json, sys
-try:
-    focused = [p["pane_id"] for p in json.load(sys.stdin)["result"]["panes"] if p.get("focused")]
-    print(focused[0])
-except Exception:
-    sys.exit(1)') || pane=""
-  elif [ -n "$HERDR_PANE_ID" ]; then
-    pane="$HERDR_PANE_ID"
-  fi
-fi
+HERE = os.path.dirname(os.path.realpath(__file__))
+EDITOR = os.path.join(HERE, "lawnotes.py")
+UPDATER = os.path.join(HERE, "update.py")
+INSTALLED = os.path.basename(os.path.dirname(HERE)) == "versions"  # vs a development checkout
+ROOT = os.path.dirname(os.path.dirname(HERE)) if INSTALLED else None
+CACHE = os.path.expanduser("~/.cache/lawnotes")
+RUNNING = os.path.join(CACHE, "running.json")
+REQUEST = os.path.join(CACHE, "open-request.json")
 
-if [ -n "$pane" ]; then
-  quoted=""
-  [ ${#args[@]} -gt 0 ] && quoted=$(printf "%q " "${args[@]}")
-  new=$(herdr pane split "$pane" --direction right --ratio 0.5 --focus --cwd "$HOME" \
-        | python3 -c 'import json, sys; print(json.load(sys.stdin)["result"]["pane"]["pane_id"])') && \
-  herdr pane run "$new" "python3 '$DIR/lawnotes.py' $quoted || read -r -p 'Press Enter to close this pane. '; exit" >/dev/null && {
-    [ "$mode" = app ] && open -a Terminal
-    exit 0
-  }
-fi
 
-if [ "$mode" = app ]; then
-  exec open -a Terminal "$DIR/app/Law Notes.command"  # no herdr: a new Terminal window
-fi
-exec python3 "$DIR/lawnotes.py" "${args[@]}"
+def herdr(*args):
+    """Run a herdr command and return its JSON result, or None."""
+    if not shutil.which("herdr"):
+        return None
+    try:
+        r = subprocess.run(["herdr", *args], capture_output=True, text=True, timeout=15)
+        return json.loads(r.stdout)["result"] if r.returncode == 0 else None
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        return None
+
+
+def running():
+    """Details of the Law Notes copy that's open on this Mac, if any."""
+    try:
+        with open(RUNNING) as f:
+            info = json.load(f)
+        os.kill(info["pid"], 0)
+        cmd = subprocess.run(["ps", "-p", str(info["pid"]), "-o", "command="],
+                             capture_output=True, text=True).stdout
+        return info if "lawnotes.py" in cmd else None
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def request(note):
+    """Ask the open (or about to open) editor to open this note."""
+    if not note:
+        return
+    if os.path.exists(note):  # a real file: make it absolute before the cwd changes
+        note = os.path.abspath(note)
+    os.makedirs(CACHE, exist_ok=True)
+    with open(REQUEST + ".tmp", "w") as f:
+        json.dump({"note": note, "time": time.time()}, f)
+    os.replace(REQUEST + ".tmp", REQUEST)
+
+
+def bring_forward(info, from_app):
+    pane = herdr("pane", "get", info["pane"]) if info.get("pane") else None
+    if pane:
+        herdr("tab", "focus", pane["pane"]["tab_id"])
+        where = "its herdr tab"
+    else:
+        where = "its Terminal window"
+    if from_app or not pane:
+        subprocess.run(["open", "-a", "Terminal"])
+    print(f"Law Notes is already open — switched to {where}.")
+
+
+def editor_command(note):
+    parts = [sys.executable, EDITOR] + ([note] if note else [])
+    return " ".join(shlex.quote(p) for p in parts) + " || read -r -p 'Press Enter to close. '; exit"
+
+
+def open_tab(note):
+    """A herdr tab called Notes in the current workspace."""
+    me = herdr("pane", "get", os.environ["HERDR_PANE_ID"])
+    if not me:
+        return False
+    tab = herdr("tab", "create", "--workspace", me["pane"]["workspace_id"], "--label", "Notes",
+                "--focus", "--cwd", os.path.expanduser("~"))
+    if not tab:
+        return False
+    return herdr("pane", "run", tab["root_pane"]["pane_id"], editor_command(note)) is not None
+
+
+def open_split(note):
+    new = herdr("pane", "split", os.environ["HERDR_PANE_ID"], "--direction", "right", "--ratio", "0.5",
+                "--focus", "--cwd", os.path.expanduser("~"))
+    return bool(new) and herdr("pane", "run", new["pane"]["pane_id"], editor_command(note)) is not None
+
+
+def open_window(note):
+    """The dedicated window: Terminal with the Law Notes profile (dark red, sized for prose)."""
+    profile = os.path.join(ROOT, "Law Notes.terminal") if ROOT else None
+    if not profile or not os.path.exists(profile):
+        return False
+    request(note)  # picked up by the editor as it starts
+    return subprocess.run(["open", profile]).returncode == 0
+
+
+def background_update():
+    if INSTALLED and not os.environ.get("LAWNOTES_NO_UPDATE"):
+        subprocess.Popen([sys.executable, UPDATER, "--daily"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def main():
+    args = sys.argv[1:]
+    flag = args[0] if args and args[0].startswith("-") else None
+    note = next((a for a in args if not a.startswith("-")), None)
+
+    if flag in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    if flag in ("-V", "--version"):
+        version = subprocess.run([sys.executable, EDITOR, "--version"], capture_output=True, text=True).stdout.strip()
+        print(version + ("" if INSTALLED else f" (development copy in {HERE})"))
+        return 0
+    if flag in ("--update", "--rollback", "--uninstall"):
+        if not INSTALLED:
+            print("This is a development copy; install Law Notes to update it.", file=sys.stderr)
+            return 1
+        return subprocess.run([sys.executable, UPDATER, {"--update": "--now"}.get(flag, flag)]).returncode
+    if flag == "--self-test":
+        return subprocess.run([sys.executable, EDITOR, "--self-test"]).returncode
+
+    in_herdr = bool(os.environ.get("HERDR_PANE_ID")) and shutil.which("herdr")
+    mode = {"--window": "window", "--app": "window", "--split": "split", "--here": "here"}.get(
+        flag, "tab" if in_herdr else "here")
+    background_update()
+
+    if mode != "here":
+        info = running()
+        if info:
+            request(note)
+            bring_forward(info, from_app=flag == "--app")
+            return 0
+        opened = {"window": open_window, "tab": open_tab, "split": open_split}[mode](note) if (
+            mode == "window" or in_herdr) else False
+        if opened:
+            return 0
+        if flag == "--app":  # no profile (development copy): a plain Terminal window
+            return subprocess.run(["open", "-a", "Terminal", EDITOR]).returncode
+    os.execv(sys.executable, [sys.executable, EDITOR] + ([note] if note else []))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

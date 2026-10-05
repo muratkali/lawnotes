@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  test:
+    name: tests (${{ matrix.python }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: [system, "3.12"]  # system = /usr/bin/python3, what a fresh Mac has
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        if: matrix.python != 'system'
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run tests
+        run: |
+          if [ "${{ matrix.python }}" = system ]; then PY=/usr/bin/python3; else PY=python3; fi
+          export PATH="$(dirname "$($PY -c 'import sys; print(sys.executable)')"):$PATH"
+          $PY --version
+          $PY lawnotes.py --self-test
+          $PY -m unittest discover -s tests -v
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n install.sh release.sh
+      - run: shellcheck install.sh release.sh
+
+  version:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: VERSION in lawnotes.py matches the tag
+        run: |
+          v=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' lawnotes.py)
+          [ "v$v" = "${GITHUB_REF_NAME}" ] || { echo "VERSION is $v but the tag is ${GITHUB_REF_NAME}"; exit 1; }

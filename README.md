@@ -6,8 +6,7 @@ A small terminal editor for law notes on macOS. Notes are plain Markdown files, 
 - Templates for case briefs, IRAC problem answers, statutes, essay plans and lecture notes.
 - Search across all notes (^P), a case index across all notes (^B), and an outline of the open note (^L).
 - British English spell check using the Mac's own dictionary, which knows legal Latin.
-- Saves as you type. Automatic version history (^R) is kept on this Mac, outside any synced folder.
-- Opens in a new [herdr](https://herdr.dev) pane when run inside herdr.
+- Saves as you type, never overwrites a note changed on another Mac, and keeps version history (^R).
 
 Press **^G** in the editor to see every shortcut.
 
@@ -19,35 +18,58 @@ Run this in Terminal:
 curl -fsSL https://raw.githubusercontent.com/muratkali/lawnotes/main/install.sh | bash
 ```
 
-You need Apple's Command Line Tools. If they're missing, the installer opens Apple's install window; run it again afterwards.
+You need Apple's Command Line Tools. If they're missing, the installer opens Apple's install window; run it again afterwards. On a new Mac, let iCloud Drive finish syncing first, so your existing notes are already there.
 
-The installer sets up:
+The installer installs the newest **signed release** and sets up:
 
-- the code in `~/.local/share/lawnotes`
-- the `lawnotes` command in `~/.local/bin`
-- **Law Notes.app** in `~/Applications`, which you can open from Spotlight or drag to the Dock
-- the notes folder `~/UCL/notes`, linked to **iCloud Drive → UCL Notes** if iCloud Drive is on, so every Mac signed in to the same Apple ID shares the same notes
+- **Law Notes.app** in `~/Applications`. Open it from Spotlight or the Dock: it opens one dedicated, dark red Law Notes window, or brings the open one forward.
+- the `lawnotes` command. Inside [herdr](https://herdr.dev) it opens a "Notes" tab; elsewhere it runs in the current terminal.
+- the notes folder `~/UCL/notes`, linked to **iCloud Drive → UCL Notes** when iCloud Drive is on, so every Mac signed in to the same Apple ID shares the same notes
 
-On a new Mac, let iCloud Drive finish syncing before you install, so your existing notes are already there.
+Only one copy of Law Notes runs at a time. Opening it again switches to the open copy (and opens the note you asked for there).
 
-## Updates
+## Updates, rollback, uninstall
 
-Installed copies check GitHub once a day and update themselves. The new version is used the next time you open the editor. To update straight away:
+Once a day, Law Notes checks for a newer release. It installs one only if the release is signed with the Law Notes release key and passes its self-test on your Mac; otherwise it stays on the current version and tells you why. The new version is used the next time you open the editor.
 
 ```sh
-lawnotes --update
+lawnotes --update      # check now
+lawnotes --rollback    # go back to the previous version (and skip the one you left)
+lawnotes --version
+lawnotes --uninstall   # removes the app and code; your notes and their history stay
 ```
 
-`lawnotes --version` shows what's installed. Set `LAWNOTES_NO_UPDATE=1` to turn off automatic updates.
+Set `LAWNOTES_NO_UPDATE=1` to turn off automatic updates.
+
+## Your notes and their history
+
+- Notes live in iCloud Drive → UCL Notes, which syncs your Macs. iCloud isn't a backup, though: a deletion reaches every Mac. Turn on Time Machine as well.
+- In Finder, right-click UCL Notes and choose **Keep Downloaded**, so macOS never removes notes from the Mac to save space.
+- Version history (^R) is kept on each Mac in `~/Library/Application Support/lawnotes/history.git`. Once a week a copy goes to iCloud Drive → Law Notes History, so ^R can also show versions saved on your other Macs.
+- Only `.md` and `.txt` files are kept in history. Keep lecture PDFs elsewhere, or they're simply not versioned.
 
 ## Settings
 
 Set these as environment variables:
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `LAWNOTES_DIR` | `~/UCL/notes` | where notes live |
-| `LAWNOTES_LANG` | `en_GB` | spell-check language |
-| `LAWNOTES_SPELL` | `1` | `0` turns spell check off |
-| `LAWNOTES_MOUSE` | `1` | `0` turns mouse support off |
-| `LAWNOTES_HISTORY` | `~/Library/Application Support/lawnotes/history.git` | version history store |
+- `LAWNOTES_DIR` (default `~/UCL/notes`): where notes live
+- `LAWNOTES_LANG` (default `en_GB`): spell-check language
+- `LAWNOTES_SPELL=0`: turn spell check off
+- `LAWNOTES_MOUSE=0`: turn mouse support off
+- `LAWNOTES_NO_UPDATE=1`: turn automatic updates off
+
+## Developing and releasing
+
+```sh
+python3 -m unittest discover -s tests -v   # editor, install, update and rollback tests
+python3 lawnotes.py --self-test
+```
+
+CI runs the tests on macOS with the system Python (what a fresh Mac has) and a current Python, plus shellcheck. To release:
+
+1. Make sure CI passed on `main`.
+2. Set `VERSION` in `lawnotes.py` and add a `## X.Y.Z` section to `CHANGELOG.md`, then commit and push.
+3. When CI is green again, run `./release.sh X.Y.Z`. It checks all of the above, signs the tag with the release key (`~/.ssh/lawnotes_release_ed25519`), pushes it and creates the GitHub release.
+4. Run `lawnotes --update` on one Mac and open a note before the others update themselves.
+
+Versions follow semver: patch for fixes, minor for features, major for changes to the notes layout or history store.

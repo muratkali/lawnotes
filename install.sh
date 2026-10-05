@@ -1,82 +1,68 @@
 #!/bin/bash
-# Install or update Law Notes, a terminal editor for law notes, on this Mac.
+# Install or repair Law Notes, a terminal editor for law notes, on this Mac.
 #
 #   curl -fsSL https://raw.githubusercontent.com/muratkali/lawnotes/main/install.sh | bash
 #
-# Puts the code in ~/.local/share/lawnotes (a git clone, so it can update itself),
-# the `lawnotes` command in ~/.local/bin, and Law Notes.app in ~/Applications.
-# Notes go in ~/UCL/notes, linked to iCloud Drive/UCL Notes when iCloud Drive is on.
-# Running it again updates everything; `lawnotes --update` does the same.
+# Installs the newest signed release (or LAWNOTES_VERSION=vX.Y.Z): the code in
+# ~/.local/share/lawnotes, the `lawnotes` command in ~/.local/bin and Law Notes.app in
+# ~/Applications. Notes go in ~/UCL/notes, linked to iCloud Drive/UCL Notes when
+# iCloud Drive is on. Releases must be signed with the Law Notes release key below;
+# this Mac trusts that key from now on, and update.py refuses anything else.
+
+# The Law Notes release key (public half). Trusted on first install.
+RELEASE_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMhskw5ZcDEaxPBGHMu8Dr/3zeTsm1sz0iCuN7ooAsE8 lawnotes-release'
 
 main() {
   set -euo pipefail
   local repo="${LAWNOTES_REPO:-https://github.com/muratkali/lawnotes.git}"
-  local home="${LAWNOTES_HOME:-$HOME/.local/share/lawnotes}"
-  local bin="$HOME/.local/bin"
-  local app="$HOME/Applications/Law Notes.app"
-  local notes="$HOME/UCL/notes"
-  local icloud="$HOME/Library/Mobile Documents/com~apple~CloudDocs"
+  local root="${LAWNOTES_HOME:-$HOME/.local/share/lawnotes}"
+  local signers="${LAWNOTES_SIGNERS:-$HOME/.config/lawnotes/allowed_signers}"
 
-  [ "$(uname)" = Darwin ] || { echo "Law Notes is for macOS."; exit 1; }
+  [ "$(uname)" = Darwin ] || fail "Law Notes is for macOS."
   if ! xcode-select -p >/dev/null 2>&1; then
     echo "Law Notes needs Apple's Command Line Tools (git, Python and Swift)."
     echo "A window will open to install them. Run this installer again when they're done."
     xcode-select --install 2>/dev/null || true
     exit 1
   fi
+  python3 -c 'import sys, curses; assert sys.version_info >= (3, 9)' 2>/dev/null \
+    || fail "Law Notes needs Python 3.9 or newer with curses (python3 is $(python3 --version 2>&1))."
 
-  # 1. The code: a git clone, so updates are a fast-forward
-  if [ -d "$home/.git" ]; then
-    say "Updating Law Notes in ${home/#$HOME/~}"
-    git -C "$home" pull --ff-only -q
-  else
-    say "Downloading Law Notes to ${home/#$HOME/~}"
-    mkdir -p "$(dirname "$home")"
-    git clone -q "$repo" "$home"
-  fi
-  chmod +x "$home/lawnotes" "$home/lawnotes.py" "$home/app/Law Notes.command"
-
-  # 2. The `lawnotes` command
-  mkdir -p "$bin"
-  ln -sfn "$home/lawnotes" "$bin/lawnotes"
-  if ! grep -qs '\.local/bin' "$HOME/.zprofile" "$HOME/.zshrc"; then
-    printf '\n# Added by the Law Notes installer\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$HOME/.zprofile"
-    say "Added ~/.local/bin to your PATH (in ~/.zprofile): new Terminal windows will know \`lawnotes\`"
+  # The key releases must be signed with. Kept if already there: it is this Mac's trust anchor.
+  if [ ! -s "$signers" ]; then
+    mkdir -p "$(dirname "$signers")"
+    printf 'lawnotes-release namespaces="git" %s\n' "${RELEASE_KEY% *}" > "$signers"
   fi
 
-  # 3. Law Notes.app (rebuilt each time; only replaces an app that is ours)
-  if [ -e "$app" ] && ! grep -qs 'li.muratka.lawnotes' "$app/Contents/Info.plist"; then
-    say "Skipping the app: ${app/#$HOME/~} exists and isn't Law Notes"
-  else
-    say "Building ${app/#$HOME/~}"
-    rm -rf "$app"
-    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-    cp "$home/app/Info.plist" "$app/Contents/Info.plist"
-    cp "$home/app/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
-    printf '#!/bin/bash\nexec "%s/lawnotes" --app\n' "$home" > "$app/Contents/MacOS/law-notes"
-    chmod +x "$app/Contents/MacOS/law-notes"
-    codesign --force --deep --sign - "$app" >/dev/null 2>&1 || true
-    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
-      -f "$app" >/dev/null 2>&1 || true
+  # Version 1.0 installed a plain clone here: move it aside
+  if [ -d "$root/.git" ]; then
+    local old="$root.old-$(date +%Y%m%d%H%M%S)"
+    mv "$root" "$old"
+    say "Moved the old Law Notes install to ${old/#$HOME/~} (deleted once this works)"
+    trap 'echo "Install failed; the old copy is still in ${old/#$HOME/~}"' ERR
   fi
-
-  # 4. The notes folder (never touched if it already exists)
-  if [ ! -e "$notes" ]; then
-    mkdir -p "$(dirname "$notes")"
-    if [ -d "$icloud" ]; then
-      mkdir -p "$icloud/UCL Notes"  # iCloud merges this with the same folder from your other Macs
-      ln -s "$icloud/UCL Notes" "$notes"
-      say "Notes: ~/UCL/notes → iCloud Drive/UCL Notes"
-    else
-      mkdir -p "$notes"
-      say "Notes: ~/UCL/notes (iCloud Drive is off, so notes stay on this Mac)"
-    fi
+  mkdir -p "$root"
+  if [ ! -d "$root/repo.git" ]; then
+    say "Downloading Law Notes"
+    git clone -q --bare "$repo" "$root/repo.git"
   fi
+  git --git-dir="$root/repo.git" fetch -q origin 'refs/tags/*:refs/tags/*'
 
-  say "Done: $(python3 "$home/lawnotes.py" --version)"
-  echo "    Open it from Spotlight (⌘Space → Law Notes) or type: lawnotes"
+  local tag="${LAWNOTES_VERSION:-$(git --git-dir="$root/repo.git" tag -l 'v*' --sort=-v:refname | head -1)}"
+  [ -n "$tag" ] || fail "No Law Notes releases found."
+  git --git-dir="$root/repo.git" -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$signers" \
+    verify-tag "$tag" >/dev/null 2>&1 || fail "Release $tag isn't signed with the Law Notes release key. Not installing."
+  say "Installing Law Notes $tag (signature verified)"
+
+  # Run the verified release's own installer step
+  rm -rf "$root/versions/$tag"
+  git --git-dir="$root/repo.git" worktree prune
+  git --git-dir="$root/repo.git" worktree add -q --detach "$root/versions/$tag" "$tag"
+  python3 "$root/versions/$tag/update.py" --install "$tag"
+  if [ -n "${old:-}" ]; then rm -rf "$old"; fi
 }
 
 say() { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
+fail() { echo "$*" >&2; exit 1; }
 
-main "$@"  # whole file is read before running, so updating it mid-run is safe
+main "$@"  # whole file is read before running, so a cut-off download runs nothing

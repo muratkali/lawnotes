@@ -2,13 +2,12 @@
 """
 lawnotes — a small terminal editor for law notes.
 
-    lawnotes                 pick a note (inside herdr: opens in a new pane)
+    lawnotes                 open Law Notes (inside herdr: in a "Notes" tab)
     lawnotes Tort/Duty       open or create ~/UCL/notes/Tort/Duty.md
-    lawnotes --update        update to the latest version from GitHub
-    lawnotes --version
+    lawnotes --help          all launcher options (update, rollback, uninstall…)
 
-Installed copies update themselves from GitHub once a day (set LAWNOTES_NO_UPDATE=1
-to stop that); the new version is used the next time you open the editor.
+Installed copies update themselves once a day to the newest signed release that
+passes its self-test (set LAWNOTES_NO_UPDATE=1 to stop that). See update.py.
 
 Notes are plain Markdown kept in ~/UCL/notes (set LAWNOTES_DIR to change it), which is a
 link to iCloud Drive/UCL Notes. Version history is kept on this Mac only, in
@@ -54,9 +53,8 @@ import traceback
 import unicodedata
 from functools import lru_cache
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
-UPDATE_EVERY = 24 * 3600
 NOTES_DIR = os.path.abspath(os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes")))
 NOTE_EXTS = (".md", ".txt")
 MAX_TEXT_WIDTH = 90
@@ -71,7 +69,14 @@ MOUSE_ON = os.environ.get("LAWNOTES_MOUSE", "1") != "0"
 # folder may be synced (iCloud Drive) and cloud sync corrupts git stores.
 HISTORY_DIR = os.path.expanduser(os.environ.get("LAWNOTES_HISTORY", "~/Library/Application Support/lawnotes/history.git"))
 ICLOUD_DIR = os.path.expanduser("~/Library/Mobile Documents/com~apple~CloudDocs")
+HISTORY_BUNDLES = os.path.join(ICLOUD_DIR, "Law Notes History")  # weekly copy of each Mac's history
+BUNDLE_EVERY = 7 * 24 * 3600
+RUNNING_FILE = os.path.join(CACHE_DIR, "running.json")      # single instance: who has Law Notes open
+REQUEST_FILE = os.path.join(CACHE_DIR, "open-request.json")  # the launcher asks the open editor to open a note
+MESSAGE_FILE = os.path.join(CACHE_DIR, "update-message")     # written by update.py
 SNAPSHOT_EVERY = 600  # seconds between automatic snapshots while you work
+# Only notes go into history: no PDFs or other files kept in the notes folder.
+HISTORY_EXCLUDE = "*\n!*/\n!*.md\n!*.txt\n.*\n*~\n"
 
 # Legal Latin and terms of art the system dictionary doesn't know.
 LAW_WORDS = set("""
@@ -159,7 +164,7 @@ TEMPLATES = [
 # Capitalised words that start sentences rather than case names.
 _STOP = r"(?!(?:In|The|See|As|Per|Following|Applying|Cf|But|And|Also|This|That|Under|After|Before|From|Since|Note|Compare|Contrast|Unlike|Like|Whereas|However|Thus|Here|Then)\b)"
 _WORD = r"[A-Z][\w'’\-]*"
-_NAME = rf"{_WORD}(?:\s+(?:(?:of|and|the|for|&)\s+)*{_WORD})*(?:\s+(?:plc|Ltd|LLP|Co|Inc)\.?)?"
+_NAME = rf"{_WORD}(?:\s+(?:(?:of|the|for|&)\s+)*{_WORD})*(?:\s+(?:plc|Ltd|LLP|Co|Inc)\.?)?"
 CASE_RE = re.compile(rf"\b{_STOP}(?:{_NAME}\s+v\.?\s+{_NAME}|Re\s+{_NAME})")
 CITE_RE = re.compile(
     r"[\[(]\d{4}[\])](?:\s+\d+)?\s+[A-Z][A-Za-z]*(?:\s+[A-Z][A-Za-z]*)?\s+\d+(?:\s+\([A-Za-z]+\))?"
@@ -206,6 +211,7 @@ class Buffer:
         self.note = None          # message to show after opening (e.g. encoding)
         self.undo_stack, self.redo_stack = [], []
         self._last_kind, self._last_time = None, 0.0
+        self._after = None  # cursor position after the last edit: moving away starts a new undo step
         if os.path.exists(path):
             self.load()
 
@@ -261,13 +267,14 @@ class Buffer:
             raise
         self.disk_mtime = os.stat(target).st_mtime_ns
         self.dirty, self.dirty_since = False, None
+        self._last_kind = None  # typing after a save is a new undo step
         return note
 
     # Undo: snapshot the whole buffer before each edit, merging runs of typing.
     def checkpoint(self, kind, boundary=False):
         now = time.time()
-        merge = (kind in ("type", "delete") and kind == self._last_kind
-                 and now - self._last_time < 2 and not boundary)
+        merge = (kind in ("type", "delete") and kind == self._last_kind and now - self._last_time < 2
+                 and not boundary and (self.cy, self.cx) == self._after)
         if not merge:
             self.undo_stack.append((self.lines[:], self.cy, self.cx))
             del self.undo_stack[:-300]
@@ -307,6 +314,7 @@ class Buffer:
             self.lines[self.cy:self.cy + 1] = [before + parts[0], *parts[1:-1], parts[-1] + after]
             self.cy += len(parts) - 1
             self.cx = len(parts[-1])
+        self._after = (self.cy, self.cx)
 
     def newline(self, plain=False):
         """Split the line, continuing bullets/numbering; Enter on an empty bullet ends the list.
@@ -361,6 +369,7 @@ class Buffer:
             self.lines[self.cy - 1] = prev + self.lines.pop(self.cy)
             self.cy -= 1
             self.cx = len(prev)
+        self._after = (self.cy, self.cx)
 
     def delete(self):
         line = self.lines[self.cy]
@@ -371,6 +380,7 @@ class Buffer:
             self.lines[self.cy] = line[:self.cx] + line[self.cx + 1:]
         else:
             self.lines[self.cy] = line + self.lines.pop(self.cy + 1)
+        self._after = (self.cy, self.cx)
 
     def cut_line(self):
         self.checkpoint("cut")
@@ -676,13 +686,19 @@ class History:
             capture_output=True, timeout=60)
 
     def _ensure(self):
-        if os.path.exists(os.path.join(HISTORY_DIR, "HEAD")):
-            return
-        os.makedirs(os.path.dirname(HISTORY_DIR), exist_ok=True)
-        subprocess.run(["git", "init", "-q", "--bare", HISTORY_DIR], check=True, capture_output=True, timeout=30)
-        os.makedirs(os.path.join(HISTORY_DIR, "info"), exist_ok=True)
-        with open(os.path.join(HISTORY_DIR, "info", "exclude"), "a") as f:
-            f.write(".*\n*~\n")  # hidden files, the store itself, half-written saves
+        if not os.path.exists(os.path.join(HISTORY_DIR, "HEAD")):
+            os.makedirs(os.path.dirname(HISTORY_DIR), exist_ok=True)
+            subprocess.run(["git", "init", "-q", "--bare", HISTORY_DIR], check=True, capture_output=True, timeout=30)
+        exclude = os.path.join(HISTORY_DIR, "info", "exclude")
+        os.makedirs(os.path.dirname(exclude), exist_ok=True)
+        try:
+            current = open(exclude).read()
+        except OSError:
+            current = ""
+        if current != HISTORY_EXCLUDE:
+            with open(exclude, "w") as f:
+                f.write(HISTORY_EXCLUDE)
+            self.git("rm", "-r", "-q", "--cached", "--ignore-unmatch", ".")  # forget non-notes added before
 
     def snapshot(self, wait=False):
         if not self.ok:
@@ -696,6 +712,7 @@ class History:
                     self.git("add", "-A", ".")
                     if self.git("diff", "--cached", "--quiet").returncode == 1:
                         self.git("commit", "-q", "-m", f"Snapshot {datetime.datetime.now():%Y-%m-%d %H:%M}")
+                    self.export_bundle()
                 except (OSError, subprocess.SubprocessError):
                     pass
         if wait:
@@ -703,60 +720,68 @@ class History:
         else:
             threading.Thread(target=work, daemon=True).start()
 
+    @staticmethod
+    def mac_name():
+        try:
+            name = subprocess.run(["scutil", "--get", "ComputerName"], capture_output=True, text=True,
+                                  timeout=5).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            name = ""
+        return re.sub(r"[/:]", "-", name or os.uname().nodename)
+
+    def export_bundle(self):
+        """Weekly: copy this Mac's history into iCloud Drive as one file (safe to sync,
+        unlike a live git store), so it survives this Mac and other Macs can read it."""
+        if not os.path.isdir(ICLOUD_DIR):
+            return
+        target = os.path.join(HISTORY_BUNDLES, self.mac_name() + ".bundle")
+        try:
+            if time.time() - os.path.getmtime(target) < BUNDLE_EVERY:
+                return
+        except OSError:
+            pass
+        os.makedirs(HISTORY_BUNDLES, exist_ok=True)
+        tmp = os.path.join(HISTORY_BUNDLES, "." + os.path.basename(target) + ".tmp")
+        if self.git("bundle", "create", tmp, "--branches").returncode == 0:
+            os.replace(tmp, target)
+
+    def import_bundles(self):
+        """Read the other Macs' weekly history copies, so ^R can offer their versions too."""
+        own = self.mac_name() + ".bundle"
+        try:
+            names = [n for n in os.listdir(HISTORY_BUNDLES) if n.endswith(".bundle") and n != own]
+        except OSError:
+            return
+        for n in names:
+            mac = re.sub(r"[^\w.-]", "_", n[:-len(".bundle")])
+            self.git("fetch", "-q", os.path.join(HISTORY_BUNDLES, n), f"+refs/heads/*:refs/remotes/{mac}/*")
+
     def rel(self, path):
         rel = os.path.relpath(os.path.realpath(path), os.path.realpath(NOTES_DIR))
         return None if rel.startswith("..") else rel
 
     def versions(self, path):
-        """[(commit, unix time)] newest first, for one note."""
+        """[(commit, unix time, other Mac's name or "")] newest first, for one note."""
         rel = self.rel(path)
         if not (self.ok and rel and os.path.exists(os.path.join(HISTORY_DIR, "HEAD"))):
             return []
         with self.lock:
-            r = self.git("log", "--format=%H %ct", "--", rel)
-        return [(h, int(t)) for h, t in (l.split() for l in r.stdout.decode().splitlines() if l.strip())]
+            self.import_bundles()
+            r = self.git("log", "--all", "--source", "--format=%H %ct %S", "--", rel)
+        out, seen = [], set()
+        for line in r.stdout.decode().splitlines():
+            parts = line.split(" ", 2)
+            if len(parts) < 2 or parts[0] in seen:
+                continue
+            seen.add(parts[0])
+            ref = parts[2] if len(parts) > 2 else ""
+            mac = ref.split("/")[2] if ref.startswith("refs/remotes/") else ""
+            out.append((parts[0], int(parts[1]), mac))
+        return sorted(out, key=lambda v: -v[1])
 
     def content(self, commit, path):
         r = self.git("show", f"{commit}:{self.rel(path)}")
         return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
-
-
-class Updater:
-    """Once a day, quietly fast-forward this copy of Law Notes from GitHub.
-
-    Only for git clones (the installer makes one), never when the copy has local
-    changes, and only fast-forwards, so it can't damage anything. The running
-    editor keeps its loaded code; the update takes effect on the next start."""
-
-    def __init__(self):
-        self.message = None
-        self.stamp = os.path.join(CACHE_DIR, "last-update-check")
-        if (os.environ.get("LAWNOTES_NO_UPDATE") or not shutil.which("git")
-                or not os.path.isdir(os.path.join(APP_DIR, ".git"))):
-            return
-        try:
-            if time.time() - os.path.getmtime(self.stamp) < UPDATE_EVERY:
-                return
-        except OSError:
-            pass
-        threading.Thread(target=self._run, daemon=True).start()
-
-    def _run(self):
-        def git(*args):
-            return subprocess.run(["git", "-C", APP_DIR, *args], capture_output=True, text=True, timeout=120)
-        try:
-            if git("status", "--porcelain").stdout.strip():
-                return  # someone is editing this copy: leave it alone
-            if git("fetch", "-q", "origin").returncode != 0:
-                return  # offline: try again next time
-            os.makedirs(CACHE_DIR, exist_ok=True)
-            with open(self.stamp, "w"):
-                pass
-            before = git("rev-parse", "HEAD").stdout.strip()
-            if git("merge", "--ff-only", "-q", "@{u}").returncode == 0 and git("rev-parse", "HEAD").stdout.strip() != before:
-                self.message = "Law Notes has been updated — quit (^Q) and reopen to use the new version"
-        except (OSError, subprocess.SubprocessError):
-            pass
 
 
 # --- Terminal UI -------------------------------------------------------------
@@ -845,7 +870,6 @@ class App:
         self.anchor = None      # selection start (line, col); the cursor is the other end
         self.row_map = []       # screen row -> (line, start, end, last segment) for mouse clicks
         self.history = History()
-        self.updater = Updater()
         self.speller = Speller(SPELL_LANG) if SPELL_ON and sys.platform == "darwin" else None
         curses.raw()  # deliver ^S ^Q ^Z ^C to us instead of the terminal
         scr.timeout(1000)
@@ -979,6 +1003,45 @@ class App:
         if self.buf and self.buf.dirty:
             return self.safe_save()
         return True
+
+    def check_outside_change(self):
+        """A note open here but changed elsewhere (another Mac via iCloud, another app):
+        reload it while it has no unsaved changes, instead of making a conflict copy later."""
+        b = self.buf
+        if b.dirty or b.disk_mtime is None:
+            return
+        try:
+            mtime = os.stat(os.path.realpath(b.path)).st_mtime_ns
+        except OSError:
+            return
+        if mtime != b.disk_mtime:
+            cy, cx = b.cy, b.cx
+            b.load()
+            b.cy = min(cy, len(b.lines) - 1)
+            b.cx = min(cx, len(b.lines[b.cy]))
+            b.undo_stack.clear()  # undoing past the reload would overwrite the other version
+            b.redo_stack.clear()
+            self.say("This note changed on another Mac or in another app — reloaded", 8)
+
+    def check_inbox(self):
+        """Requests from the launcher ("open this note") and messages from the updater."""
+        try:
+            with open(REQUEST_FILE) as f:
+                req = json.load(f)
+            os.remove(REQUEST_FILE)
+            if req.get("note") and time.time() - req.get("time", 0) < 120:
+                path = resolve_note(req["note"])
+                self.goto(path, 0) if os.path.exists(path) else self.open(path)
+        except (OSError, ValueError):
+            pass
+        try:
+            with open(MESSAGE_FILE) as f:
+                msg = f.read().strip()
+            os.remove(MESSAGE_FILE)
+            if msg:
+                self.say(msg, 15)
+        except OSError:
+            pass
 
     def autosave(self):
         b, now = self.buf, time.time()
@@ -1555,7 +1618,7 @@ class App:
         versions = h.versions(b.path)[:40]
         current = b.lines
         items = []
-        for n, (commit, when) in enumerate(versions):
+        for n, (commit, when, mac) in enumerate(versions):
             text = h.content(commit, b.path)
             if text is None:
                 continue
@@ -1567,7 +1630,8 @@ class App:
             stamp = datetime.datetime.fromtimestamp(when).strftime("%a %d %b %H:%M")
             words = sum(len(l.split()) for l in lines)
             diff = "same as now" if not changed else f"{changed} line{'s' * (changed != 1)} different"
-            items.append((f"{stamp}   {words:,} words · {diff}", (lines, stamp)))
+            where = f" · from {mac.replace('_', ' ')}" if mac else ""
+            items.append((f"{stamp}   {words:,} words · {diff}{where}", (lines, stamp)))
         if not items:
             self.say("No earlier versions yet — snapshots are taken every few minutes while you work")
             return
@@ -1890,7 +1954,10 @@ class App:
         if MOUSE_ON:  # button presses and drags, in the SGR format (wheel-down works, unlike X10)
             sys.stdout.write("\x1b[?1002h\x1b[?1006h")
         sys.stdout.flush()
+        write_running()
         try:
+            if not path:
+                path = take_request()  # the launcher asked for a note before this window opened
             if path:
                 self.open(path)
             elif not self.open_picker():
@@ -1898,9 +1965,7 @@ class App:
             if time.time() >= self.msg_until:
                 self.say("Tip: ^G shows every shortcut")
             while True:
-                if self.updater.message:
-                    self.say(self.updater.message, 15)
-                    self.updater.message = None
+                self.check_inbox()
                 if self.speller:
                     self.speller.poll()
                 self.draw()
@@ -1910,6 +1975,7 @@ class App:
                 self.scr.timeout(1000)
                 if key is None:
                     self.autosave()
+                    self.check_outside_change()
                     continue
                 # Apply everything already typed before redrawing, so fast typing never queues
                 quit = False
@@ -1929,6 +1995,7 @@ class App:
             if self.buf and self.buf.dirty and not self.safe_save():
                 self.write_recovery()
             self.history.snapshot(wait=True)
+            clear_running()
             if self.speller:
                 self.speller.close()
             try:
@@ -1938,28 +2005,119 @@ class App:
                 pass  # the terminal may already be gone
 
 
+def resolve_note(arg):
+    """'Tort/Duty' means ~/UCL/notes/Tort/Duty.md; an existing file path is used as is."""
+    arg = os.path.expanduser(arg.strip())
+    if not os.path.isabs(arg) and not os.path.exists(arg):
+        arg = os.path.join(NOTES_DIR, arg)
+        if not arg.endswith(NOTE_EXTS):
+            arg += ".md"
+    return os.path.abspath(arg)
+
+
+def take_request():
+    try:
+        with open(REQUEST_FILE) as f:
+            req = json.load(f)
+        os.remove(REQUEST_FILE)
+        if req.get("note") and time.time() - req.get("time", 0) < 120:
+            return resolve_note(req["note"])
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def write_running():
+    """Tell the launcher Law Notes is open here, so it focuses this copy instead of starting another."""
+    try:
+        tty = os.ttyname(sys.stdin.fileno())
+    except OSError:
+        tty = ""
+    info = {"pid": os.getpid(), "pane": os.environ.get("HERDR_PANE_ID", ""), "tty": tty,
+            "terminal": os.environ.get("TERM_PROGRAM", ""), "started": time.time()}
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        tmp = RUNNING_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(info, f)
+        os.replace(tmp, RUNNING_FILE)
+    except OSError:
+        pass
+
+
+def clear_running():
+    try:
+        with open(RUNNING_FILE) as f:
+            if json.load(f).get("pid") == os.getpid():
+                os.remove(RUNNING_FILE)
+    except (OSError, ValueError):
+        pass
+
+
+def self_test():
+    """Quick checks of the parts that keep notes safe; update.py runs this before switching
+    to a new version, so a broken release is never used."""
+    import tempfile
+    results = []
+
+    def check(name, fn):
+        try:
+            results.append((name, bool(fn()), ""))
+        except Exception as e:  # report, don't crash: the point is a clear pass/fail
+            results.append((name, False, f"{type(e).__name__}: {e}"))
+
+    with tempfile.TemporaryDirectory() as d:
+        note = os.path.join(d, "Tort", "Duty.md")
+
+        def save_and_reload():
+            b = Buffer(note)
+            b.insert("- Duty: Donoghue v Stevenson [1932] AC 562")
+            b.newline()
+            b.insert("Caparo")
+            b.save()
+            return Buffer(note).lines == ["- Duty: Donoghue v Stevenson [1932] AC 562", "- Caparo"]
+
+        def conflict_copy():
+            b = Buffer(note)
+            time.sleep(0.02)
+            with open(note, "w") as f:
+                f.write("changed elsewhere\n")
+            b.insert("mine ")
+            msg = b.save()
+            return msg and open(note).read() == "changed elsewhere\n" and os.path.exists(b.path) and b.path != note
+
+        def windows_text():
+            p = os.path.join(d, "w.md")
+            with open(p, "wb") as f:
+                f.write("Lord Atkin\u2019s test".encode("cp1252"))
+            return Buffer(p).lines == ["Lord Atkin\u2019s test"]
+
+        check("save and reload a note", save_and_reload)
+        check("never overwrite a note changed elsewhere", conflict_copy)
+        check("open Windows-encoded notes", windows_text)
+        check("keep spaces in pasted citations", lambda: clean_text("v\u00a0Stevenson") == "v Stevenson")
+        check("find case names", lambda: [m.group() for m in CASE_RE.finditer(
+            "Lord Atkin in Donoghue v Stevenson")] == ["Donoghue v Stevenson"])
+        check("wrap lines", lambda: wrap_starts("hello world foo", 8) == (0, 6, 12))
+        check("terminal library", lambda: callable(curses.wrapper))
+    for name, ok, err in results:
+        print(f"{'ok  ' if ok else 'FAIL'}  {name}{('  ' + err) if err else ''}")
+    failed = sum(not ok for _, ok, _ in results)
+    print(f"Law Notes {VERSION} self-test: {'passed' if not failed else f'{failed} failed'}")
+    return 0 if not failed else 1
+
+
 def main():
     args = sys.argv[1:]
+    if args and args[0] == "--self-test":
+        sys.exit(self_test())
     if args and args[0] in ("-h", "--help"):
         print(__doc__)
         return
     if args and args[0] in ("-V", "--version"):
-        commit = ""
-        if os.path.isdir(os.path.join(APP_DIR, ".git")) and shutil.which("git"):
-            r = subprocess.run(["git", "-C", APP_DIR, "log", "-1", "--format=%h, %cd", "--date=format:%d %b %Y"],
-                               capture_output=True, text=True)
-            commit = f" ({r.stdout.strip()})" if r.returncode == 0 else ""
-        print(f"Law Notes {VERSION}{commit}")
+        print(f"Law Notes {VERSION}")
         return
-    path = None
-    if args and args[0].strip():
-        arg = os.path.expanduser(args[0])
-        if not os.path.isabs(arg) and not os.path.exists(arg):
-            # "Tort/Duty" means a note in the notes folder, not in the current directory
-            arg = os.path.join(NOTES_DIR, arg)
-            if not arg.endswith(NOTE_EXTS):
-                arg += ".md"
-        path = os.path.abspath(arg)
+    path = resolve_note(args[0]) if args and args[0].strip() else None
     os.makedirs(NOTES_DIR, exist_ok=True)
     locale.setlocale(locale.LC_ALL, "")
     os.environ.setdefault("ESCDELAY", "25")
