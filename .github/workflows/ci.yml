@@ -15,8 +15,8 @@ jobs:
       matrix:
         python: [system, "3.12"]  # system = /usr/bin/python3, what a fresh Mac has
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         if: matrix.python != 'system'
         with:
           python-version: ${{ matrix.python }}
@@ -31,7 +31,7 @@ jobs:
   shell:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: bash -n install.sh release.sh
       - run: shellcheck install.sh release.sh
 
@@ -39,7 +39,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: VERSION in lawnotes.py matches the tag
         run: |
           v=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' lawnotes.py)

@@ -36,7 +36,8 @@ main() {
 
   # Version 1.0 installed a plain clone here: move it aside
   if [ -d "$root/.git" ]; then
-    local old="$root.old-$(date +%Y%m%d%H%M%S)"
+    local old
+    old="$root.old-$(date +%Y%m%d%H%M%S)"
     mv "$root" "$old"
     say "Moved the old Law Notes install to ${old/#$HOME/~} (deleted once this works)"
     trap 'echo "Install failed; the old copy is still in ${old/#$HOME/~}"' ERR
