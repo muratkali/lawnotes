@@ -1,6 +1,7 @@
 // Generates app/Law Notes.terminal: the Terminal profile for the dedicated Law Notes window.
 // Run: swift app/terminal-profile.swift "app/Law Notes.terminal"
-// update.py fills in CommandString when it installs a version.
+// update.py replaces __LAWNOTES_COMMAND__ with the real command when it installs a version
+// (as text: the key map below holds a raw Escape character that plistlib can't round-trip).
 import AppKit
 
 func rgb(_ hex: Int) -> NSColor {
@@ -26,7 +27,10 @@ let profile: [String: Any] = [
     "FontAntialias": true,
     "columnCount": 100,   // the 90-column text plus room
     "rowCount": 45,
-    "CommandString": "lawnotes --here",
+    "CommandString": "__LAWNOTES_COMMAND__",
+    // Terminal sends Shift+Return as plain Return; send what herdr sends (CSI 13;2 u) so the
+    // editor can tell them apart. Key format: $ = Shift, then the key's hex code.
+    "keyMapBoundKeys": ["$000D": "\u{1b}[13;2u"],
     "RunCommandAsShell": true,
     "shellExitAction": 1,  // close the window when Law Notes quits normally
     "useOptionAsMetaKey": true,  // Option+Enter, Option+arrows

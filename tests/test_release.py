@@ -85,7 +85,11 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(self.current(), "v9.0.0")
         app = os.path.join(self.home, "Applications", "Law Notes.app", "Contents")
         self.assertIn(".local/bin", open(os.path.join(app, "MacOS", "law-notes")).read())  # PATH for herdr
-        self.assertTrue(os.path.exists(os.path.join(self.share, "Law Notes.terminal")))
+        profile = os.path.join(self.share, "Law Notes.terminal")
+        run("plutil", "-lint", profile)
+        text = open(profile, encoding="utf-8").read()
+        self.assertIn(os.path.join(self.share, "current", "lawnotes") + "' --here", text)
+        self.assertIn("<key>$000D</key>", text)  # Shift+Return mapped for the editor
         self.assertTrue(os.path.islink(os.path.join(self.home, "UCL", "notes")) or
                         os.path.isdir(os.path.join(self.home, "UCL", "notes")))
         self.assertIn("Law Notes", self.lawnotes_cmd("--version").stdout)

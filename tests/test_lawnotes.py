@@ -226,5 +226,64 @@ class SessionTests(unittest.TestCase):
         self.assertNotIn("Hist/lecture.pdf", files)
 
 
+FAKE_HERDR = r"""#!/bin/bash
+# Stands in for herdr: answers like the real one and logs every call.
+echo "$*" >> "$HERDR_LOG"
+case "$1 $2" in
+  "pane get") echo '{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1"}}}' ;;
+  "tab create") echo '{"result":{"root_pane":{"pane_id":"w1:p2"},"tab":{"tab_id":"w1:t2"}}}' ;;
+  "pane split") echo '{"result":{"pane":{"pane_id":"w1:p3"}}}' ;;
+  *) ;;  # pane run, tab focus: success, no output
+esac
+"""
+
+
+class LauncherTests(unittest.TestCase):
+    def setUp(self):
+        self.bin = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(self.bin, "herdr"), "w") as f:
+            f.write(FAKE_HERDR)
+        os.chmod(os.path.join(self.bin, "herdr"), 0o755)
+        self.log = os.path.join(self.bin, "calls.log")
+        self.env = {**os.environ, "PATH": self.bin + os.pathsep + os.environ["PATH"],
+                    "HERDR_PANE_ID": "w1:p1", "HERDR_LOG": self.log}
+
+    def launch(self, *args):
+        return subprocess.run([sys.executable, os.path.join(ROOT, "lawnotes"), *args], env=self.env,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=20)
+
+    def test_tab_opens_once_and_editor_not_started_here(self):
+        r = self.launch("Tort/Duty")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        calls = open(self.log).read()
+        self.assertIn("tab create --workspace w1 --label Notes", calls)
+        self.assertIn("pane run w1:p2", calls)
+        self.assertIn("Tort/Duty", calls)
+        self.assertNotIn("Traceback", r.stderr)  # the editor would crash here without a terminal
+
+    def test_split(self):
+        r = self.launch("--split")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("pane run w1:p3", open(self.log).read())
+
+    def test_open_copy_is_brought_forward(self):
+        os.makedirs(os.path.dirname(lawnotes.RUNNING_FILE), exist_ok=True)
+        sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "lawnotes.py"])
+        try:
+            with open(lawnotes.RUNNING_FILE, "w") as f:
+                json.dump({"pid": sleeper.pid, "pane": "w1:p9"}, f)
+            r = self.launch("Contract/Offer")
+            self.assertIn("already open", r.stdout)
+            calls = open(self.log).read()
+            self.assertIn("tab focus w1:t1", calls)
+            self.assertNotIn("tab create", calls)
+            self.assertEqual(json.load(open(lawnotes.REQUEST_FILE))["note"], "Contract/Offer")
+        finally:
+            sleeper.kill()
+            for f in (lawnotes.RUNNING_FILE, lawnotes.REQUEST_FILE):
+                if os.path.exists(f):
+                    os.remove(f)
+
+
 if __name__ == "__main__":
     unittest.main()

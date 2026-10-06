@@ -33,12 +33,14 @@ REQUEST = os.path.join(CACHE, "open-request.json")
 
 
 def herdr(*args):
-    """Run a herdr command and return its JSON result, or None."""
+    """Run a herdr command: its JSON result, {} for success without output, or None on failure."""
     if not shutil.which("herdr"):
         return None
     try:
         r = subprocess.run(["herdr", *args], capture_output=True, text=True, timeout=15)
-        return json.loads(r.stdout)["result"] if r.returncode == 0 else None
+        if r.returncode != 0:
+            return None
+        return json.loads(r.stdout)["result"] if r.stdout.strip() else {}  # `pane run` prints nothing
     except (OSError, ValueError, KeyError, subprocess.SubprocessError):
         return None
 

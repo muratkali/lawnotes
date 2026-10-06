@@ -77,7 +77,7 @@
 	bg13DYQNhw2UDZ0Nog2qAAAAAAAAAgEAAAAAAAAAKgAAAAAAAAAAAAAAAAAADa0=
 	</data>
 	<key>CommandString</key>
-	<string>lawnotes --here</string>
+	<string>__LAWNOTES_COMMAND__</string>
 	<key>CursorColor</key>
 	<data>
 	YnBsaXN0MDDUAQIDBAUGBwpYJHZlcnNpb25ZJGFyY2hpdmVyVCR0b3BYJG9iamVjdHMS
@@ -408,6 +408,11 @@
 	<string></string>
 	<key>columnCount</key>
 	<integer>100</integer>
+	<key>keyMapBoundKeys</key>
+	<dict>
+		<key>$000D</key>
+		<string>[13;2u</string>
+	</dict>
 	<key>name</key>
 	<string>Law Notes</string>
 	<key>rowCount</key>

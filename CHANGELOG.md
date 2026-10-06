@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.1
+
+- Inside herdr, `lawnotes` started a second editor in the current pane as well as the Notes tab (herdr's `pane run` succeeds without printing anything). Fixed, with tests.
+- Shift+Enter works in the dedicated Law Notes window: its Terminal profile now sends Shift+Return as a distinct key, like herdr does.
+
 ## 1.1.0
 
 - Safer updates: only signed releases are installed, each must pass a self-test first, the previous version is kept, and `lawnotes --rollback` goes back. The updater (`update.py`) runs outside the editor.

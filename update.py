@@ -153,12 +153,15 @@ def link_command():
 
 
 def build_profile(path):
-    """The dedicated window: dark red, sized for prose, running the editor."""
+    """The dedicated window: dark red, sized for prose, running the editor. Filled in as text,
+    because the profile's key map holds a raw Escape character that plistlib refuses."""
     with open(os.path.join(path, "app", "Law Notes.terminal"), "rb") as f:
-        profile = plistlib.load(f)
-    profile["CommandString"] = f"'{os.path.join(CURRENT, 'lawnotes')}' --here"
+        template = f.read()
+    command = f"'{os.path.join(CURRENT, 'lawnotes')}' --here"
+    command = command.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    assert template.count(b"__LAWNOTES_COMMAND__") == 1, "profile template has no command placeholder"
     with open(PROFILE + ".tmp", "wb") as f:
-        plistlib.dump(profile, f)
+        f.write(template.replace(b"__LAWNOTES_COMMAND__", command.encode()))
     os.replace(PROFILE + ".tmp", PROFILE)
 
 
