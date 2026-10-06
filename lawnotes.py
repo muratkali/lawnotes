@@ -53,7 +53,7 @@ import traceback
 import unicodedata
 from functools import lru_cache
 
-VERSION = "1.1.4"
+VERSION = "1.1.5"
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
 NOTES_DIR = os.path.abspath(os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes")))
 NOTE_EXTS = (".md", ".txt")
@@ -826,6 +826,8 @@ HELP = [
     ("PgUp PgDn", "Page up / down."),
     ("#", "Selecting, copying and pasting"),
     ("Shift+arrows", "Select text (Shift+Option+arrows selects by word). Click with the mouse to place the cursor, drag to select."),
+    ("Double-click", "Selects a word, or a whole case name, citation or statute. Triple-click selects the line."),
+    ("Scroll", "The mouse wheel moves the view only; the cursor stays where it was, and typing carries on there."),
     ("^C  ^X  ^V", "Copy / cut / paste using the Mac clipboard. With nothing selected, ^C and ^X take the whole line. ⌘V works too."),
     ("Typing", "With text selected, typing or Backspace replaces it."),
     ("#", "Editing"),
@@ -883,6 +885,10 @@ class App:
         self._hl = {}
         self.ignored = set()
         self.anchor = None      # selection start (line, col); the cursor is the other end
+        self.free_view = False  # scrolled with the wheel: the view moves, the cursor stays put
+        self.flash = None       # ((line, col), (line, col), until): what ^C just copied, shown briefly
+        self.last_click = (0.0, None, 0)  # time, position, count: for double and triple clicks
+        self.hold_selection = False       # a double/triple click's release mustn't collapse it
         self.row_map = []       # screen row -> (line, start, end, last segment) for mouse clicks
         self.history = History()
         self.speller = Speller(SPELL_LANG) if SPELL_ON and sys.platform == "darwin" else None
@@ -978,6 +984,7 @@ class App:
         self.history.snapshot()
         self.buf = Buffer(path)
         self.top = self.top_seg = 0
+        self.free_view = False
         self.search = ""
         self.recovery_path = None
         if not os.path.exists(path):
@@ -1189,7 +1196,11 @@ class App:
         textw = min(MAX_TEXT_WIDTH, W - 1)
         self.left = 0
         self.wrapw = textw - 1
-        self.scroll()
+        if self.free_view:  # keep the scrolled view; just make sure it's still inside the note
+            self.top = min(self.top, len(b.lines) - 1)
+            self.top_seg = min(self.top_seg, len(self.segs(self.top)) - 1)
+        else:
+            self.scroll()
 
         ck, _ = self.seg_of(b.cy, b.cx)
         q = self.search.lower()
@@ -1211,11 +1222,12 @@ class App:
                     attrs[a:e] = [self.A["spell"]] * (e - a)
                     if i == b.cy and a <= b.cx < e:
                         on_typo = True
-            if sel and sel[0][0] <= i <= sel[1][0]:
-                attrs = attrs[:]
-                s0 = sel[0][1] if i == sel[0][0] else 0
-                s1 = sel[1][1] if i == sel[1][0] else len(line)
-                attrs[s0:s1] = [self.A["sel"]] * (s1 - s0)
+            for span in (sel, self.flash[:2] if self.flash and time.time() < self.flash[2] else None):
+                if span and span[0][0] <= i <= span[1][0]:
+                    attrs = attrs[:]
+                    s0 = span[0][1] if i == span[0][0] else 0
+                    s1 = span[1][1] if i == span[1][0] else len(line)
+                    attrs[s0:s1] = [self.A["sel"]] * (s1 - s0)
             if q and q in line.lower():
                 attrs = attrs[:]
                 low, j = line.lower(), line.lower().find(q)
@@ -1263,6 +1275,10 @@ class App:
             self.put(H - 1, x + len(key) + 1, label, self.A["dim"])
             x += len(key) + len(label) + 3
 
+        try:
+            curses.curs_set(1 if cursor else 0)  # scrolled away from the cursor: hide it
+        except curses.error:
+            pass
         if cursor:
             scr.move(*cursor)
         sys.stdout.write("\x1b[?2026h")  # begin synchronised update (ignored where unsupported)
@@ -1779,6 +1795,8 @@ class App:
             text = b.lines[b.cy] + "\n"
         self.clip_text = text
         where = "clipboard" if clipboard_set(text) else "editor clipboard"
+        if not cut and not self.selection():  # show which line was copied, without selecting it
+            self.flash = ((b.cy, 0), (b.cy, len(b.lines[b.cy])), time.time() + 0.8)
         words = len(text.split())
         if cut:
             if self.selection():
@@ -1808,26 +1826,67 @@ class App:
         """Click places the cursor, drag selects, Shift+click extends, wheel scrolls.
         Returns True to keep the selection."""
         b = self.buf
-        if button & 64:  # wheel: 64 up, 65 down
-            self.move_vertical(3 if button & 1 else -3)
-            return False
+        if button & 64:  # wheel (64 up, 65 down): move the view only, the cursor stays put
+            self.scroll_view(3 if button & 1 else -3)
+            return self.anchor is not None
         if button & 3:  # middle or right button: ignore
             return self.anchor is not None
         pos = self.screen_to_buf(y, x)
         if pos is None:
             return self.anchor is not None
         if button & 32:  # dragging with the button held
+            self.hold_selection = False
             b.cy, b.cx = pos
             return True
         if pressed:
             if button & 4:  # Shift+click extends the selection
                 self.anchor = self.anchor or (b.cy, b.cx)
-            else:
-                self.anchor = pos
+                b.cy, b.cx = pos
+                return True
+            now, (t, p, n) = time.time(), self.last_click
+            n = n + 1 if now - t < 0.4 and p and p[0] == pos[0] and abs(p[1] - pos[1]) <= 1 else 1
+            self.last_click = (now, pos, n)
+            if n >= 2:  # double click: a word (or a whole case name); triple: the line
+                span = self.word_at(*pos) if n == 2 else (0, len(b.lines[pos[0]]))
+                if span:
+                    self.anchor = (pos[0], span[0])
+                    b.cy, b.cx = pos[0], span[1]
+                    self.hold_selection = True
+                    return True
+            self.anchor = pos
             b.cy, b.cx = pos
+            return True
+        if self.hold_selection:  # release after a double or triple click
+            self.hold_selection = False
             return True
         b.cy, b.cx = pos  # released
         return self.anchor is not None and self.anchor != pos
+
+    def word_at(self, y, x):
+        """What a double click selects: a case name, citation or statute if x is inside one,
+        else the word under x. (start, end) or None."""
+        line = self.buf.lines[y]
+        for rx in (CASE_RE, CITE_RE, STATUTE_RE, re.compile(r"[\w\u2019'-]+")):
+            for m in rx.finditer(line):
+                if m.start() <= x < m.end():
+                    return m.start(), m.end()
+        return None
+
+    def scroll_view(self, rows):
+        self.free_view = True
+        i, s = self.top, self.top_seg
+        for _ in range(abs(rows)):
+            if rows > 0:
+                if s < len(self.segs(i)) - 1:
+                    s += 1
+                elif i < len(self.buf.lines) - 1:
+                    i, s = i + 1, 0
+            elif s > 0:
+                s -= 1
+            elif i > 0:
+                i -= 1
+                s = len(self.segs(i)) - 1
+        self.top, self.top_seg = i, s
 
     def normalise(self, key):
         """One key name for every way a terminal can send it."""
@@ -1849,6 +1908,9 @@ class App:
         if key is None:
             return
         b = self.buf
+        self.flash = None
+        if not (isinstance(key, tuple) and key[0] == "mouse" and key[1][0] & 64):
+            self.free_view = False  # anything but the wheel brings the view back to the cursor
         extend = key in SELECT_MOVES
         if extend:
             key = SELECT_MOVES[key]

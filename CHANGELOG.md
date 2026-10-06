@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.5
+
+- Double-click selects a word, or a whole case name, citation or statute; triple-click selects the line.
+- Scrolling with the mouse moves the view only: the cursor stays where it was, and typing carries on there.
+- ^C with nothing selected briefly highlights the line it copied.
+
 ## 1.1.4
 
 - Scrolling a note crashed Law Notes when a misspelt word in italics (for example inside a case name) came into view: `curses.pair_number()` overflows on italic text with macOS's ncurses. Fixed, with a test.

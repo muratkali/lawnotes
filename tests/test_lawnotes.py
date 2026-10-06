@@ -201,6 +201,36 @@ class Session:
 
 
 class SessionTests(unittest.TestCase):
+    def test_double_and_triple_click(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Click.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("Duty owed by D\nDonoghue v Stevenson [1932] AC 562 applies\nthird line\n")
+        click = lambda col, row: f"\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m".encode()
+        s = Session(note)
+        s.keys(click(2, 1) + click(2, 1) + b"Breach", 0.5)            # double-click a word
+        s.keys(click(6, 2) + click(6, 2) + b"Caparo", 0.5)            # double-click inside a case name
+        s.keys(click(3, 3) + click(3, 3) + click(3, 3) + b"X\x13", 0.6)  # triple-click a line
+        self.assertTrue(s.quit())
+        self.assertEqual(open(note).read().splitlines(), ["Breach owed by D", "Caparo [1932] AC 562 applies", "X"])
+
+    def test_wheel_moves_view_not_cursor_and_copy(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Scroll2.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("".join(f"line {i}\n" for i in range(80)))
+        fake = tempfile.mkdtemp(dir=TMP)
+        clip = os.path.join(fake, "clipboard")
+        with open(os.path.join(fake, "pbcopy"), "w") as f:
+            f.write(f"#!/bin/sh\ncat > '{clip}'\n")
+        os.chmod(os.path.join(fake, "pbcopy"), 0o755)
+        s = Session(note, env={"PATH": fake + os.pathsep + os.environ["PATH"]})
+        screen = s.keys(b"\x1b[<65;10;10M" * 6, 0.6)                 # wheel down 18 rows
+        self.assertIn("44", screen)  # the view moved: rows beyond the first screen were drawn
+        s.keys(b"\x03", 0.5)                                              # copy with nothing selected
+        self.assertEqual(open(clip).read(), "line 0\n")                 # the cursor's line, not the view's
+        s.keys(b"Q\x13", 0.5)                                             # typing goes where the cursor was
+        self.assertTrue(s.quit())
+        self.assertEqual(open(note).read().splitlines()[0], "Qline 0")    # the flash didn't select it
+
     def test_split_scroll_events_neither_close_nor_type(self):
         """A scroll event whose ESC arrives 120 ms before the rest (seen through herdr)."""
         wheel = b"\x1b[<65;50;10M"
