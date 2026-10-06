@@ -56,6 +56,19 @@ class BufferTests(unittest.TestCase):
         b.undo()
         self.assertEqual(b.lines, ["alpha", "beta"])
 
+    def test_delete_words(self):
+        b = lawnotes.Buffer(self.path)
+        b.insert("the ratio decidendi")
+        b.delete_word_left()
+        self.assertEqual(b.lines, ["the ratio "])
+        b.delete_word_left()
+        self.assertEqual(b.lines, ["the "])
+        b.cx = 0
+        b.delete_word_right()
+        self.assertEqual(b.lines, [" "])
+        b.undo()
+        self.assertEqual(b.lines, ["the "])
+
     def test_save_round_trip_and_undo(self):
         b = lawnotes.Buffer(self.path)
         b.insert("Donoghue v Stevenson")
@@ -309,6 +322,31 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(s.quit())
         self.assertEqual(open(a).read(), "left# AZ\n")
         self.assertEqual(open(os.path.join(folder, "B.md")).read(), "# B\n\nright\n")
+
+    def test_option_backspace_deletes_a_word(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Words.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("Donoghue v Stevenson neighbour\n")
+        s = Session(note)
+        s.keys(b"\x05\x1b\x7f", 0.4)        # end of line, Option+Backspace
+        s.keys(b"\x01\x1b[3;3~\x13", 0.5)  # start of line, Option+Fn+Backspace
+        self.assertTrue(s.quit())
+        self.assertEqual(open(note).read(), " v Stevenson \n")
+
+    def test_drag_border_resizes_panes(self):
+        folder = os.path.join(lawnotes.NOTES_DIR, "Drag")
+        os.makedirs(folder, exist_ok=True)
+        a = os.path.join(folder, "A.md")
+        open(a, "w").write("# A\n")
+        s = Session(a)
+        s.keys(b"\x1bd", 0.8)
+        s.keys(b"\x1b", 0.5)                               # both panes show A; right is active
+        s.keys(b"\x1b[<0;50;5M\x1b[<32;71;5M\x1b[<0;71;5m", 0.5)  # drag the border from col 49 to 70
+        s.keys(b"\x1b[<0;61;1M\x1b[<0;61;1m", 0.4)        # col 60 is now inside the left pane
+        s.keys(b"L", 0.3)
+        self.assertTrue(s.quit())
+        self.assertEqual(open(a).read(), "# AL\n")         # typed in the left pane, at the end of line 1
+        self.assertEqual(lawnotes.Layout.MIN_W, 16)
 
     def test_same_note_in_two_panes_stays_in_sync(self):
         folder = os.path.join(lawnotes.NOTES_DIR, "Sync")

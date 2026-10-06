@@ -54,11 +54,12 @@ import traceback
 import unicodedata
 from functools import lru_cache
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
 NOTES_DIR = os.path.abspath(os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes")))
 NOTE_EXTS = (".md", ".txt")
 MAX_TEXT_WIDTH = 90
+LEFT_PAD = 1  # columns of space before the text in each pane
 AUTOSAVE_AFTER = 3  # seconds idle after a change
 AUTOSAVE_MAX = 15   # ...or this long after the first unsaved change, even while typing
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
@@ -394,6 +395,33 @@ class Buffer:
             self.lines[self.cy] = line[:self.cx] + line[self.cx + 1:]
         else:
             self.lines[self.cy] = line + self.lines.pop(self.cy + 1)
+        self._after = (self.cy, self.cx)
+
+    def delete_word_left(self):
+        """Option+Backspace: the word before the cursor (and the spaces after it)."""
+        if self.cx == 0:
+            return self.backspace()
+        line, i = self.lines[self.cy], self.cx
+        while i > 0 and not line[i - 1].isalnum():
+            i -= 1
+        while i > 0 and line[i - 1].isalnum():
+            i -= 1
+        self.checkpoint("delete", boundary=True)
+        self.lines[self.cy] = line[:i] + line[self.cx:]
+        self.cx = i
+        self._after = (self.cy, self.cx)
+
+    def delete_word_right(self):
+        """Option+Fn+Backspace: the word after the cursor."""
+        line, i = self.lines[self.cy], self.cx
+        if i >= len(line):
+            return self.delete()
+        while i < len(line) and not line[i].isalnum():
+            i += 1
+        while i < len(line) and line[i].isalnum():
+            i += 1
+        self.checkpoint("delete", boundary=True)
+        self.lines[self.cy] = line[:self.cx] + line[i:]
         self._after = (self.cy, self.cx)
 
     def cut_line(self):
@@ -943,8 +971,12 @@ class Pane:
 class Layout:
     """A tree of splits: a leaf holds a pane; 'v' puts children side by side, 'h' stacks them."""
 
+    MIN_W, MIN_H = 16, 3  # smallest pane a border drag can leave
+
     def __init__(self, kind, a=None, b=None, pane=None):
         self.kind, self.a, self.b, self.pane = kind, a, b, pane
+        self.ratio = 0.5            # share of the space the first child gets
+        self.rect = (0, 0, 0, 0)
 
     @classmethod
     def leaf(cls, pane):
@@ -958,6 +990,7 @@ class Layout:
         if self.kind == "leaf":
             if self.pane is pane:
                 self.kind, self.a, self.b, self.pane = node.kind, node.a, node.b, node.pane
+                self.ratio = node.ratio
                 return True
             return False
         return self.a.replace(pane, node) or self.b.replace(pane, node)
@@ -969,6 +1002,7 @@ class Layout:
                 continue
             if child.kind == "leaf" and child.pane is pane:
                 self.kind, self.a, self.b, self.pane = other.kind, other.a, other.b, other.pane
+                self.ratio = other.ratio
                 return self
             if child.kind != "leaf":
                 found = child.remove(pane)
@@ -977,16 +1011,30 @@ class Layout:
         return None
 
     def place(self, y, x, h, w):
-        """Give every pane its rectangle; returns the separators (y, x, height) to draw."""
+        """Give every pane its rectangle. Returns the borders that can be dragged with the
+        mouse: ("v", node, y, x, height) for the line between side-by-side panes, and
+        ("h", node, y, x, width) for the status line above the border of stacked panes."""
+        self.rect = (y, x, h, w)
         if self.kind == "leaf":
             self.pane.rect = (y, x, h, w)
             return []
         if self.kind == "v":
-            w1 = max(1, (w - 1) // 2)
-            return (self.a.place(y, x, h, w1) + [(y, x + w1, h)]
+            w1 = min(max(1, round((w - 1) * self.ratio)), max(1, w - 2))
+            return (self.a.place(y, x, h, w1) + [("v", self, y, x + w1, h)]
                     + self.b.place(y, x + w1 + 1, h, w - w1 - 1))
-        h1 = max(1, h // 2)
-        return self.a.place(y, x, h1, w) + self.b.place(y + h1, x, h - h1, w)
+        h1 = min(max(1, round(h * self.ratio)), max(1, h - 1))
+        return (self.a.place(y, x, h1, w) + [("h", self, y + h1 - 1, x, w)]
+                + self.b.place(y + h1, x, h - h1, w))
+
+    def drag_to(self, y, x):
+        """Move this split's border to the mouse position, keeping both sides usable."""
+        ny, nx, nh, nw = self.rect
+        if self.kind == "v":
+            w1 = min(max(x - nx, self.MIN_W), nw - 1 - self.MIN_W)
+            self.ratio = w1 / max(1, nw - 1)
+        else:
+            h1 = min(max(y - ny + 1, self.MIN_H), nh - self.MIN_H)
+            self.ratio = h1 / max(1, nh)
 
 
 # --- Terminal UI -------------------------------------------------------------
@@ -1001,6 +1049,7 @@ HELP = [
     ("Option+D", "Split side by side; Option+Shift+D splits one above the other. The new pane opens the note list (Esc keeps the same note)."),
     ("Option+O", "Next pane. Clicking a pane also switches to it."),
     ("Option+W", "Close the pane (the note is saved first)."),
+    ("Drag", "Drag the line between side-by-side panes to resize them; for stacked panes, drag the upper pane's status bar."),
     ("", "The same note in two panes stays in sync: both show your edits as you type."),
     ("#", "Notes and folders"),
     ("^O", "Open a note. Type to filter the list, Enter to open."),
@@ -1020,6 +1069,7 @@ HELP = [
     ("#", "Moving around"),
     ("^F", "Find. Press ^F and Enter again (or F3) for the next match; Esc clears the highlight."),
     ("^A  ^E", "Start / end of the line."),
+    ("Option+⌫", "Delete the word before the cursor (Option+Fn+⌫: the word after it)."),
     ("Option+←→", "Previous / next word."),
     ("PgUp PgDn", "Page up / down."),
     ("#", "Selecting, copying and pasting"),
@@ -1055,13 +1105,15 @@ CSI_KEYS = {
     "[3~": curses.KEY_DC, "[5~": curses.KEY_PPAGE, "[6~": curses.KEY_NPAGE, "[Z": curses.KEY_BTAB,
     "[27;2;13~": "shift-enter", "[13;2u": "shift-enter",
     "[1;3D": "word-left", "[1;5D": "word-left", "[1;3C": "word-right", "[1;5C": "word-right",
+    "[3;3~": "delete-word-right", "[3;5~": "delete-word-right",
     "[1;2D": curses.KEY_SLEFT, "[1;2C": curses.KEY_SRIGHT, "[1;2A": curses.KEY_SR, "[1;2B": curses.KEY_SF,
     "[1;2H": curses.KEY_SHOME, "[1;2F": curses.KEY_SEND,
     "[1;4D": "sel-word-left", "[1;6D": "sel-word-left", "[1;4C": "sel-word-right", "[1;6C": "sel-word-right",
 }
 # Option/Ctrl(+Shift)+arrows as curses names them
 NAMED_KEYS = {"kLFT3": "word-left", "kLFT5": "word-left", "kRIT3": "word-right", "kRIT5": "word-right",
-              "kLFT4": "sel-word-left", "kLFT6": "sel-word-left", "kRIT4": "sel-word-right", "kRIT6": "sel-word-right"}
+              "kLFT4": "sel-word-left", "kLFT6": "sel-word-left", "kRIT4": "sel-word-right", "kRIT6": "sel-word-right",
+              "kDC3": "delete-word-right", "kDC5": "delete-word-right"}
 # Shifted movement extends the selection
 SELECT_MOVES = {curses.KEY_SLEFT: curses.KEY_LEFT, curses.KEY_SRIGHT: curses.KEY_RIGHT,
                 curses.KEY_SR: curses.KEY_UP, curses.KEY_SF: curses.KEY_DOWN,
@@ -1077,6 +1129,7 @@ class App:
         self.buf = None
         self.pane = Pane()
         self.layout = Layout.leaf(self.pane)
+        self.borders, self.resizing = [], None  # pane borders, and the one being dragged
         self.top = self.top_seg = 0
         self.want_x = None
         self.rows, self.left, self.wrapw = 20, 0, 80
@@ -1501,9 +1554,12 @@ class App:
             self.put(0, 0, "Window too small"[:W - 1])
             scr.refresh()
             return
-        for y, x, h in self.layout.place(0, 0, H - 1, W):  # separators between side-by-side panes
-            for r in range(h):
-                self.put(y + r, x, "│", self.A["dim"])
+        self.borders = self.layout.place(0, 0, H - 1, W)
+        for kind, node, y, x, h in self.borders:  # the line between side-by-side panes
+            if kind == "v":
+                look = self.A["key"] if node is self.resizing else self.A["dim"]
+                for r in range(h):
+                    self.put(y + r, x, "│", look)
         cursor = None
         for pane in self.panes():
             with self.viewing(pane):
@@ -1536,8 +1592,8 @@ class App:
         b = self.buf
         H, W = self.scr.getmaxyx()
         self.rows = max(1, height - 1)
-        textw = min(MAX_TEXT_WIDTH, width - 1)
-        self.left = left_x
+        textw = min(MAX_TEXT_WIDTH, width - 1 - LEFT_PAD)
+        self.left = left_x + LEFT_PAD  # a little room between the border and the text
         self.wrapw = max(10, textw - 1)
         if self.free_view:  # keep the scrolled view; just make sure it's still inside the note
             self.top = min(self.top, len(b.lines) - 1)
@@ -1628,7 +1684,7 @@ class App:
             first = self.get_key()
             if first in ("\r", "\n"):
                 return ("key", "shift-enter")  # Option+Enter on terminals using Option as Meta
-            if first in ("b", "f", "e", "d", "D", "w", "o"):
+            if first in ("b", "f", "e", "d", "D", "w", "o", "\x7f", "\x08"):
                 return ("alt", first)
             if first not in ("[", "O"):
                 return None
@@ -2182,6 +2238,18 @@ class App:
     def mouse(self, button, x, y, pressed):
         """Click places the cursor, drag selects, Shift+click extends, wheel scrolls.
         Returns True to keep the selection."""
+        if self.resizing is not None:  # dragging a pane border
+            if button & 32:
+                self.resizing.drag_to(y, x)
+            elif not pressed:
+                self.resizing = None
+            return self.anchor is not None
+        if pressed and not button & (3 | 32 | 64):
+            for kind, node, by, bx, size in self.borders:
+                if (kind == "v" and x == bx and by <= y < by + size) or \
+                        (kind == "h" and y == by and bx <= x < bx + size):
+                    self.resizing = node  # grabbed a border: drag to resize
+                    return self.anchor is not None
         pane = self.pane_at(y, x)
         if pane is None:
             return self.anchor is not None
@@ -2261,7 +2329,8 @@ class App:
                 return r
             if r[0] == "alt":
                 return {"b": "word-left", "f": "word-right", "e": "export", "d": "split-right",
-                        "D": "split-down", "w": "close-pane", "o": "next-pane"}[r[1]]
+                        "D": "split-down", "w": "close-pane", "o": "next-pane",
+                        "\x7f": "delete-word-left", "\x08": "delete-word-left"}[r[1]]
             return r[1]  # a curses key, a name, or None for keys we don't use
         if isinstance(key, int) and key != curses.KEY_RESIZE:
             return NAMED_KEYS.get(curses.keyname(key).decode(errors="ignore"), key)
@@ -2290,7 +2359,7 @@ class App:
             return
 
         # Typing, Enter, paste or Backspace replace selected text
-        deleting = key in BACKSPACE or key in (curses.KEY_DC, "\x04")
+        deleting = key in BACKSPACE or key in (curses.KEY_DC, "\x04", "delete-word-left", "delete-word-right")
         typing = ((isinstance(key, tuple) and key[0] == "paste") or key in ENTER or key in ("shift-enter", "\t", "\x16")
                   or (isinstance(key, str) and len(key) == 1
                       and (key.isprintable() or unicodedata.category(key) == "Zs")))
@@ -2311,6 +2380,10 @@ class App:
             self.search = ""
         elif key == "shift-enter":
             b.newline(plain=True)
+        elif key == "delete-word-left":
+            b.delete_word_left()
+        elif key == "delete-word-right":
+            b.delete_word_right()
         elif key == "word-left":
             b.word_left()
         elif key == "word-right":

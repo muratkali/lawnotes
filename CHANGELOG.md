@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.1
+
+- Resize panes with the mouse, like herdr: drag the line between side-by-side panes, or the status bar between stacked panes.
+- A one-column margin between the pane's edge and the text.
+- Option+Backspace deletes the word before the cursor; Option+Fn+Backspace the word after it.
+
 ## 1.3.0
 
 - Panes, like herdr: Option+D splits side by side, Option+Shift+D one above the other, Option+O switches, Option+W closes; clicking a pane switches to it. Each pane has its own note, view, cursor and status line; the same note in two panes shares one text and stays in sync.
