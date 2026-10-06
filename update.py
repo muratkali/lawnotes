@@ -13,10 +13,15 @@ against ~/.config/lawnotes/allowed_signers (written once by the installer and ne
 from downloaded code), and the new version must pass `lawnotes.py --self-test`.
 Otherwise this Mac stays on the version it has and says why.
 
+The running version only downloads, verifies and tests a release; the switch itself
+(`--switch TAG`) is done by the new version's own update.py, so a release always builds
+its own app and profile. If the switch fails, `current` goes back to where it was.
+
     update.py --daily          background check, at most once a day (run by the launcher)
     update.py --now            check now, and repair the app and command
     update.py --rollback       go back to the previous version and skip this one
     update.py --install TAG    first install (run by install.sh)
+    update.py --switch TAG     switch to an already verified and tested version (internal)
     update.py --uninstall
     update.py --status
 """
@@ -212,9 +217,8 @@ def prune(state):
     git("worktree", "prune", check=False)
 
 
-def activate(tag, state):
-    """Verify, stage, self-test, then switch. Raises UpdateError and leaves the current
-    version untouched if any step fails."""
+def prepare(tag, state):
+    """Verify, stage and self-test a release. Raises UpdateError (and cleans up) on failure."""
     verify(tag)
     path = stage(tag)
     try:
@@ -224,11 +228,39 @@ def activate(tag, state):
             shutil.rmtree(path, ignore_errors=True)
             git("worktree", "prune", check=False)
         raise
+    return path
+
+
+def activate(tag, state):
+    """Prepare a release, then let its own update.py switch to it."""
+    path = prepare(tag, state)
+    r = subprocess.run([sys.executable, os.path.join(path, "update.py"), "--switch", tag],
+                       capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        lines = (r.stderr or r.stdout).strip().splitlines()
+        raise UpdateError("switching failed: " + (lines[-1] if lines else "no output"))
+
+
+def switch(tag):
+    """Run by the new version: point `current` at it and build its app, profile and command.
+    Any failure puts everything back on the previous version."""
+    state = load_state()
+    before = os.readlink(CURRENT) if os.path.islink(CURRENT) else None
+    try:
+        point_current(tag)
+        refresh(tag)
+    except Exception as e:
+        if before:
+            os.symlink(before, CURRENT + ".back")
+            os.replace(CURRENT + ".back", CURRENT)
+            try:
+                refresh(os.path.basename(before))
+            except Exception:
+                pass
+        raise UpdateError(f"{type(e).__name__}: {e}")
     if state.get("current") != tag:
         state["previous"] = state.get("current")
         state["current"] = tag
-    point_current(tag)
-    refresh(tag)
     save_state(state)
     prune(state)
 
@@ -388,6 +420,9 @@ def main():
         if cmd == "--uninstall":
             uninstall()
             return 0
+        if cmd == "--switch" and len(args) > 1:
+            switch(args[1])  # run by an updater that already holds the lock
+            return 0
         with open(LOCK, "w") as lock:  # one updater at a time
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | (fcntl.LOCK_NB if cmd == "--daily" else 0))
@@ -412,9 +447,12 @@ def main():
                 print(__doc__)
                 return 2
         return 0
-    except (UpdateError, OSError, subprocess.SubprocessError) as e:
-        if cmd != "--daily":
-            print(f"Law Notes: {e}", file=sys.stderr)
+    except Exception as e:  # never a traceback: say what went wrong in one line
+        msg = str(e) if isinstance(e, (UpdateError, OSError)) else f"{type(e).__name__}: {e}"
+        if cmd == "--daily":
+            tell_editor(f"Law Notes couldn't check for updates: {msg}")
+        else:
+            print(f"Law Notes: {msg}", file=sys.stderr)
         return 1
 
 

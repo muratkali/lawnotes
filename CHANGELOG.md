@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.2
+
+- Updates are switched by the new version's own updater, so a release always builds its own app and window profile. Updating from 1.1.0 to 1.1.1 failed halfway because the old updater couldn't read the new profile.
+- If switching fails, Law Notes goes back to the previous version instead of stopping halfway, and the background updater reports problems in the editor instead of failing silently.
+
 ## 1.1.1
 
 - Inside herdr, `lawnotes` started a second editor in the current pane as well as the Notes tab (herdr's `pane run` succeeds without printing anything). Fixed, with tests.

@@ -132,12 +132,42 @@ class ReleaseTests(unittest.TestCase):
         run(sys.executable, os.path.join(self.share, "current", "update.py"), "--daily", env=self.env)
         self.assertEqual(self.current(), "v9.0.4")
 
+    def test_5b_new_version_switches_itself(self):
+        def mark(w):
+            src = open(os.path.join(w, "update.py")).read().replace(
+                'def switch(tag):\n', 'def switch(tag):\n    print("switched by the new version")\n', 1)
+            open(os.path.join(w, "update.py"), "w").write(src)
+        self.release("v9.0.6", change=mark)
+        r = self.lawnotes_cmd("--update")
+        self.assertEqual(self.current(), "v9.0.6")
+        state = open(os.path.join(self.share, "state.json")).read()
+        self.assertIn('"current": "v9.0.6"', state)
+        self.assertIn('"previous": "v9.0.4"', state)
+        self.release("v9.0.7", change=lambda w: open(os.path.join(w, "README.md"), "a").write("z\n"))
+        # and a failing switch puts everything back
+        def broken_switch(w):
+            src = open(os.path.join(w, "update.py")).read().replace(
+                "        point_current(tag)\n        refresh(tag)\n",
+                "        point_current(tag)\n        raise RuntimeError('boom')\n", 1)
+            open(os.path.join(w, "update.py"), "w").write(src)
+        self.release("v9.0.8", change=broken_switch)
+        r = self.lawnotes_cmd("--update", check=False)
+        self.assertIn("switching failed", r.stderr)
+        self.assertEqual(self.current(), "v9.0.6")
+        self.assertIn('"current": "v9.0.6"', open(os.path.join(self.share, "state.json")).read())
+        def fix_switch(w):
+            src = open(os.path.join(w, "update.py")).read().replace(
+                "        point_current(tag)\n        raise RuntimeError('boom')\n",
+                "        point_current(tag)\n        refresh(tag)\n", 1)
+            open(os.path.join(w, "update.py"), "w").write(src)
+        self.release("v9.0.9", change=fix_switch)
+
     def test_6_rollback(self):
         r = self.lawnotes_cmd("--rollback")
-        self.assertIn("Back on v9.0.1", r.stdout)
-        self.assertEqual(self.current(), "v9.0.1")
-        r = self.lawnotes_cmd("--update")  # skips the rolled-back v9.0.4, takes v9.0.5
-        self.assertEqual(self.current(), "v9.0.5")
+        self.assertIn("Back on v9.0.4", r.stdout)
+        self.assertEqual(self.current(), "v9.0.4")
+        r = self.lawnotes_cmd("--update")  # skips the rolled-back v9.0.6, takes the newest, v9.0.9
+        self.assertEqual(self.current(), "v9.0.9")
 
     def test_7_truncated_installer_runs_nothing(self):
         text = open(os.path.join(self.work, "install.sh")).read()
