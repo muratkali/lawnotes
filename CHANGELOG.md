@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.6
+
+- With text selected, `*` wraps it in `*…*` (italic) and keeps it selected, so a second `*` makes it `**…**` (bold). `_` works the same way.
+
 ## 1.1.5
 
 - Double-click selects a word, or a whole case name, citation or statute; triple-click selects the line.

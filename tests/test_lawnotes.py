@@ -213,6 +213,17 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(s.quit())
         self.assertEqual(open(note).read().splitlines(), ["Breach owed by D", "Caparo [1932] AC 562 applies", "X"])
 
+    def test_star_wraps_selection(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Wrap.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("the ratio decidendi of the case\nD and V\n")
+        click = lambda col, row: f"\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m".encode()
+        s = Session(note)
+        s.keys(click(6, 1) + click(6, 1) + b"**", 0.5)                 # double-click "ratio", * twice
+        s.keys(b"\x1bOB\x01" + b"\x1b[1;2C" * 7 + b"_\x13", 0.6)    # Shift+Right over "D and V", _
+        self.assertTrue(s.quit())
+        self.assertEqual(open(note).read().splitlines(), ["the **ratio** decidendi of the case", "_D and V_"])
+
     def test_wheel_moves_view_not_cursor_and_copy(self):
         note = os.path.join(lawnotes.NOTES_DIR, "Scroll2.md")
         os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)

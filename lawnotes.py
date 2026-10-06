@@ -53,7 +53,7 @@ import traceback
 import unicodedata
 from functools import lru_cache
 
-VERSION = "1.1.5"
+VERSION = "1.1.6"
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
 NOTES_DIR = os.path.abspath(os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes")))
 NOTE_EXTS = (".md", ".txt")
@@ -830,6 +830,7 @@ HELP = [
     ("Scroll", "The mouse wheel moves the view only; the cursor stays where it was, and typing carries on there."),
     ("^C  ^X  ^V", "Copy / cut / paste using the Mac clipboard. With nothing selected, ^C and ^X take the whole line. ⌘V works too."),
     ("Typing", "With text selected, typing or Backspace replaces it."),
+    ("*  _", "With text selected, * wraps it in *italics*; press again for **bold**. _ works the same way."),
     ("#", "Editing"),
     ("^K", "Cut the line (press repeatedly to cut several lines)."),
     ("^U", "Paste the cut lines above the cursor."),
@@ -1787,6 +1788,16 @@ class App:
         b.cy, b.cx = y1, x1
         self.anchor = None
 
+    def wrap_selection(self, mark):
+        (y1, x1), (y2, x2) = self.selection()
+        b = self.buf
+        b.checkpoint("wrap")
+        b.lines[y2] = b.lines[y2][:x2] + mark + b.lines[y2][x2:]
+        b.lines[y1] = b.lines[y1][:x1] + mark + b.lines[y1][x1:]
+        self.anchor = (y1, x1 + 1)  # select the same words, now inside the marks
+        b.cy, b.cx = y2, x2 + (1 if y1 == y2 else 0)
+        self.want_x = None
+
     def copy(self, cut=False):
         b = self.buf
         if self.selection():
@@ -1919,6 +1930,11 @@ class App:
         keep_selection = extend
         vertical = key in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE)
         was_cutting, self.cutting = self.cutting, False
+
+        # * or _ with text selected wraps it (Markdown italic; again for bold) and keeps it selected
+        if key in ("*", "_") and self.selection():
+            self.wrap_selection(key)
+            return
 
         # Typing, Enter, paste or Backspace replace selected text
         deleting = key in BACKSPACE or key in (curses.KEY_DC, "\x04")
