@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.2
+
+- Closing a window or pane could cut short the final save: the editor can get SIGHUP twice (the terminal hanging up, and whatever closed it), and the second one interrupted saving. Further signals are now ignored once Law Notes starts closing. Found by a new test on the Mac's built-in Python 3.9.
+- Closing the window or pane no longer logs a false "CRASH": the note was already saved, but restoring the vanished terminal failed afterwards. Law Notes now restores the terminal itself and ignores that.
+
 ## 1.3.1
 
 - Resize panes with the mouse, like herdr: drag the line between side-by-side panes, or the status bar between stacked panes.

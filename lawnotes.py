@@ -54,7 +54,7 @@ import traceback
 import unicodedata
 from functools import lru_cache
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
 NOTES_DIR = os.path.abspath(os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes")))
 NOTE_EXTS = (".md", ".txt")
@@ -2492,6 +2492,10 @@ class App:
     def run(self, path):
         # Closing the pane, quitting herdr or closing Terminal sends SIGHUP: save on the way out
         def stop(signum, frame):
+            # Closing a window or pane can deliver SIGHUP twice (the terminal hanging up, and
+            # whatever closed it); a second one must not interrupt the save on the way out.
+            for sig in (signal.SIGHUP, signal.SIGTERM):
+                signal.signal(sig, signal.SIG_IGN)
             self.exit_reason = {signal.SIGHUP: "window or pane closed (SIGHUP)",
                                 signal.SIGTERM: "asked to quit (SIGTERM)"}.get(signum, f"signal {signum}")
             raise SystemExit(0)
@@ -2565,8 +2569,8 @@ class App:
             try:
                 sys.stdout.write("\x1b[?2004l\x1b[>4;0m\x1b[?1006l\x1b[?1002l\x1b[?1000l")
                 sys.stdout.flush()
-            except OSError:
-                pass  # the terminal may already be gone
+            except OSError:  # the terminal is gone: don't let Python fail flushing it at exit
+                sys.stdout = open(os.devnull, "w")
 
 
 def log(event, detail=""):
@@ -2606,6 +2610,23 @@ def note_path(name):
     if not inside_notes(path):
         raise ValueError(f"“{name}” would be outside the notes folder")
     return path
+
+
+def run_curses(fn):
+    """Like curses.wrapper, but restoring the terminal can't fail: after the window or pane is
+    closed (SIGHUP) the terminal is gone, and nocbreak()/endwin() return ERR."""
+    scr = curses.initscr()
+    try:
+        curses.noecho()
+        curses.cbreak()
+        scr.keypad(True)
+        return fn(scr)
+    finally:
+        for step in (lambda: scr.keypad(False), curses.echo, curses.nocbreak, curses.endwin):
+            try:
+                step()
+            except curses.error:
+                pass
 
 
 def resolve_note(arg):
@@ -2752,7 +2773,7 @@ def main():
     locale.setlocale(locale.LC_ALL, "")
     os.environ.setdefault("ESCDELAY", "25")
     try:
-        curses.wrapper(lambda scr: App(scr).run(path))
+        run_curses(lambda scr: App(scr).run(path))
     except Exception:
         log("CRASH", traceback.format_exc())
         where = "iCloud Drive → Law Notes Logs" if os.path.isdir(ICLOUD_DIR) else LOG_FILE

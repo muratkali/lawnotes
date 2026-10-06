@@ -323,6 +323,25 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(open(a).read(), "left# AZ\n")
         self.assertEqual(open(os.path.join(folder, "B.md")).read(), "# B\n\nright\n")
 
+    def test_closing_the_terminal_saves_and_logs_no_crash(self):
+        import signal
+        note = os.path.join(lawnotes.NOTES_DIR, "Closed.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("# Closed\n")
+        s = Session(note)
+        s.keys(b"\x05 typed", 0.4)
+        os.close(s.fd)                    # the window or pane goes away...
+        os.kill(s.pid, signal.SIGHUP)     # ...and SIGHUP can arrive twice: the second
+        os.kill(s.pid, signal.SIGHUP)     # must not interrupt the save
+        for _ in range(50):
+            if os.waitpid(s.pid, os.WNOHANG)[0] == s.pid:
+                break
+            time.sleep(0.1)
+        self.assertEqual(open(note).read(), "# Closed typed\n")
+        mine = [l for l in open(lawnotes.LOG_FILE).read().splitlines() if f"[{s.pid}]" in l]
+        self.assertIn("exited: window or pane closed (SIGHUP)", "\n".join(mine))
+        self.assertFalse(any("CRASH" in l for l in mine), mine)
+
     def test_option_backspace_deletes_a_word(self):
         note = os.path.join(lawnotes.NOTES_DIR, "Words.md")
         os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
