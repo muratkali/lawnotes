@@ -1,7 +1,9 @@
 # Changelog
 
-## 1.2.1
+## 1.3.0
 
+- Panes, like herdr: Option+D splits side by side, Option+Shift+D one above the other, Option+O switches, Option+W closes; clicking a pane switches to it. Each pane has its own note, view, cursor and status line; the same note in two panes shares one text and stays in sync.
+- Clicking to place the cursor now also works inside herdr: Law Notes asks for the basic mouse-click mode (1000) as well as drag reporting, and logs the first mouse event of each session.
 - Copying is unmistakable: what ^C copied flashes green and the status bar says "✓ Copied N words". Help explains that ⌘C can't copy text selected inside Law Notes (Terminal takes it); use ^C.
 
 ## 1.2.0

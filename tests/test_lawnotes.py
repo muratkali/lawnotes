@@ -291,6 +291,40 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(s.quit())
         self.assertEqual(open(note).read().splitlines()[0], "Qline 0")    # the flash didn't select it
 
+    def test_panes_split_switch_and_close(self):
+        folder = os.path.join(lawnotes.NOTES_DIR, "Panes")
+        os.makedirs(folder, exist_ok=True)
+        a = os.path.join(folder, "A.md")
+        open(a, "w").write("# A\n")
+        s = Session(a)
+        s.keys(b"\x1bd", 0.8)                          # Option+D: split, the note list opens
+        s.keys(b"Panes/B\r", 0.8)                      # a new note in the right pane
+        s.keys(b"right", 0.4)
+        s.keys(b"\x1bo", 0.4)                          # Option+O: back to the left pane
+        s.keys(b"left", 0.4)
+        s.keys(b"\x1b[<0;9;1M\x1b[<0;9;1m", 0.4)       # click in the left pane, column 8
+        s.keys(b"Z", 0.4)
+        s.keys(b"\x1bw", 0.5)                          # Option+W closes the left pane
+        s.keys(b"\x1bw", 0.5)                          # only one left: nothing happens
+        self.assertTrue(s.quit())
+        self.assertEqual(open(a).read(), "left# AZ\n")
+        self.assertEqual(open(os.path.join(folder, "B.md")).read(), "# B\n\nright\n")
+
+    def test_same_note_in_two_panes_stays_in_sync(self):
+        folder = os.path.join(lawnotes.NOTES_DIR, "Sync")
+        os.makedirs(folder, exist_ok=True)
+        c = os.path.join(folder, "C.md")
+        open(c, "w").write("# C\n")
+        s = Session(c)
+        s.keys(b"\x1bd", 0.8)
+        s.keys(b"\x1b", 0.5)                           # Esc: keep the same note in the new pane
+        s.keys(b"X", 0.3)
+        s.keys(b"\x1bo", 0.3)
+        s.keys(b"\x05Y", 0.3)                          # left pane: end of line, type
+        self.assertTrue(s.quit())
+        self.assertEqual(open(c).read(), "X# CY\n")    # both edits, one text
+        self.assertEqual(os.listdir(folder), ["C.md"])  # no conflict copies
+
     def test_split_scroll_events_neither_close_nor_type(self):
         """A scroll event whose ESC arrives 120 ms before the rest (seen through herdr)."""
         wheel = b"\x1b[<65;50;10M"

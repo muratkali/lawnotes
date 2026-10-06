@@ -33,6 +33,7 @@ Keys (press ^G inside the editor for this list)
   Tab / Shift-Tab indent or outdent a bullet
 """
 import bisect
+import contextlib
 import curses
 import datetime
 import difflib
@@ -53,7 +54,7 @@ import traceback
 import unicodedata
 from functools import lru_cache
 
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
 NOTES_DIR = os.path.abspath(os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes")))
 NOTE_EXTS = (".md", ".txt")
@@ -923,13 +924,84 @@ class History:
         return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
 
 
+# --- Panes ---------------------------------------------------------------------
+
+class Pane:
+    """One view of a note: which note, where it's scrolled, its cursor and selection."""
+
+    def __init__(self):
+        self.buf = None
+        self.top = self.top_seg = 0
+        self.want_x = self.anchor = None
+        self.free_view = self.hold_selection = False
+        self.row_map = []
+        self.rows, self.left, self.wrapw = 20, 0, 80
+        self.cy = self.cx = 0
+        self.rect = (0, 0, 24, 80)  # top, left, height, width on screen
+
+
+class Layout:
+    """A tree of splits: a leaf holds a pane; 'v' puts children side by side, 'h' stacks them."""
+
+    def __init__(self, kind, a=None, b=None, pane=None):
+        self.kind, self.a, self.b, self.pane = kind, a, b, pane
+
+    @classmethod
+    def leaf(cls, pane):
+        return cls("leaf", pane=pane)
+
+    def leaves(self):
+        return [self.pane] if self.kind == "leaf" else self.a.leaves() + self.b.leaves()
+
+    def replace(self, pane, node):
+        """Put node where the leaf holding pane is."""
+        if self.kind == "leaf":
+            if self.pane is pane:
+                self.kind, self.a, self.b, self.pane = node.kind, node.a, node.b, node.pane
+                return True
+            return False
+        return self.a.replace(pane, node) or self.b.replace(pane, node)
+
+    def remove(self, pane):
+        """Remove pane's leaf; its sibling takes the parent's place. Returns that sibling."""
+        for child, other in ((self.a, self.b), (self.b, self.a)):
+            if child is None:
+                continue
+            if child.kind == "leaf" and child.pane is pane:
+                self.kind, self.a, self.b, self.pane = other.kind, other.a, other.b, other.pane
+                return self
+            if child.kind != "leaf":
+                found = child.remove(pane)
+                if found:
+                    return found
+        return None
+
+    def place(self, y, x, h, w):
+        """Give every pane its rectangle; returns the separators (y, x, height) to draw."""
+        if self.kind == "leaf":
+            self.pane.rect = (y, x, h, w)
+            return []
+        if self.kind == "v":
+            w1 = max(1, (w - 1) // 2)
+            return (self.a.place(y, x, h, w1) + [(y, x + w1, h)]
+                    + self.b.place(y, x + w1 + 1, h, w - w1 - 1))
+        h1 = max(1, h // 2)
+        return self.a.place(y, x, h1, w) + self.b.place(y + h1, x, h - h1, w)
+
+
 # --- Terminal UI -------------------------------------------------------------
 
 HINTS = [("^G", "Help"), ("^S", "Save"), ("^O", "Open"), ("^P", "Search all"), ("^B", "Cases"),
-         ("^F", "Find"), ("^T", "Template"), ("^W", "Spelling"), ("^R", "History"), ("^Q", "Quit")]
+         ("^F", "Find"), ("^T", "Template"), ("^W", "Spelling"), ("^R", "History"), ("⌥D", "Split"),
+         ("^Q", "Quit")]
 
 # ^G help screen: (key, description); key "#" marks a section heading, "" a plain line.
 HELP = [
+    ("#", "Panes"),
+    ("Option+D", "Split side by side; Option+Shift+D splits one above the other. The new pane opens the note list (Esc keeps the same note)."),
+    ("Option+O", "Next pane. Clicking a pane also switches to it."),
+    ("Option+W", "Close the pane (the note is saved first)."),
+    ("", "The same note in two panes stays in sync: both show your edits as you type."),
     ("#", "Notes and folders"),
     ("^O", "Open a note. Type to filter the list, Enter to open."),
     ("^N", "New note. Use Folder/Name to file it in a folder, e.g. Contract/Offer — the folder is created for you."),
@@ -1003,6 +1075,8 @@ class App:
     def __init__(self, scr):
         self.scr = scr
         self.buf = None
+        self.pane = Pane()
+        self.layout = Layout.leaf(self.pane)
         self.top = self.top_seg = 0
         self.want_x = None
         self.rows, self.left, self.wrapw = 20, 0, 80
@@ -1052,6 +1126,7 @@ class App:
             "party_V": ((16, 218), (C.COLOR_BLACK, C.COLOR_MAGENTA)),
             "party_C": ((16, 117), (C.COLOR_BLACK, C.COLOR_CYAN)),
             "copied":  ((16, 120), (C.COLOR_BLACK, C.COLOR_GREEN)),
+            "bar_off": ((181, 88), (C.COLOR_WHITE, C.COLOR_BLACK)),
         }
         pairs = {}
         for n, (role, (c256, c8)) in enumerate(palette.items(), start=1):
@@ -1083,6 +1158,7 @@ class App:
             "party_V": pairs["party_V"] | curses.A_BOLD,
             "party_C": pairs["party_C"] | curses.A_BOLD,
             "copied": pairs["copied"] | curses.A_BOLD,
+            "bar_off": pairs["bar_off"],
         }
         self.italic = italic
 
@@ -1112,7 +1188,11 @@ class App:
             self.say("Can't switch notes until this one saves", 8)
             return False
         self.history.snapshot()
-        self.buf = Buffer(path)
+        shared = [b for p, b in self.buffers() if p is not self.pane
+                  and os.path.realpath(b.path) == os.path.realpath(path)]
+        self.buf = shared[0] if shared else Buffer(path)  # same note in two panes: one shared text
+        if shared:
+            self.buf.cy = self.buf.cx = 0
         self.top = self.top_seg = 0
         self.free_view = False
         self.search = ""
@@ -1162,6 +1242,10 @@ class App:
             return "a copy is in " + self.recovery_path.replace(os.path.expanduser("~"), "~", 1)
         except OSError:
             return "no copy could be written either: keep this pane open and copy your text out"
+
+    def save_pane_buffer(self, pane):
+        with self.viewing(pane):
+            return self.save_if_dirty()
 
     def save_if_dirty(self):
         if self.buf and self.buf.dirty:
@@ -1315,18 +1399,146 @@ class App:
         except (curses.error, ValueError):
             pass
 
+    # Panes: each has its own note, view, cursor and selection. The App's view attributes
+    # always hold the active pane's state; other panes are swapped in briefly (viewing()).
+    VIEW_ATTRS = ("buf", "top", "top_seg", "want_x", "anchor", "free_view", "row_map",
+                  "rows", "left", "wrapw", "hold_selection")
+
+    def store_view(self):
+        for a in self.VIEW_ATTRS:
+            setattr(self.pane, a, getattr(self, a))
+        if self.buf:
+            self.pane.cy, self.pane.cx = self.buf.cy, self.buf.cx
+
+    def load_view(self, pane):
+        for a in self.VIEW_ATTRS:
+            setattr(self, a, getattr(pane, a))
+        self.pane = pane
+        if self.buf:  # panes showing the same note share its text but keep their own cursor
+            self.buf.cy = min(pane.cy, len(self.buf.lines) - 1)
+            self.buf.cx = min(pane.cx, len(self.buf.lines[self.buf.cy]))
+
+    @contextlib.contextmanager
+    def viewing(self, pane):
+        if pane is self.pane:
+            yield
+            return
+        active = self.pane
+        self.store_view()
+        self.load_view(pane)
+        try:
+            yield
+        finally:
+            self.store_view()
+            self.load_view(active)
+
+    def activate(self, pane):
+        if pane is not self.pane:
+            self.store_view()
+            self.load_view(pane)
+
+    def panes(self):
+        return self.layout.leaves()
+
+    def buffers(self):
+        """(pane, buffer) for each note on screen, once per note."""
+        seen, out = set(), []
+        for p in self.panes():
+            b = self.buf if p is self.pane else p.buf
+            if b and id(b) not in seen:
+                seen.add(id(b))
+                out.append((p, b))
+        return out
+
+    def split(self, kind):
+        """Option+D (side by side) or Option+Shift+D (stacked): the new pane opens the note list."""
+        rect = self.pane.rect
+        if (kind == "v" and rect[3] < 50) or (kind == "h" and rect[2] < 8):
+            self.say("Not enough room to split this pane", 5)
+            return
+        self.store_view()
+        new = Pane()
+        for a in self.VIEW_ATTRS:  # starts on the same note, same place
+            setattr(new, a, getattr(self.pane, a))
+        new.cy, new.cx, new.anchor = self.pane.cy, self.pane.cx, None
+        self.layout.replace(self.pane, Layout(kind, Layout.leaf(self.pane), Layout.leaf(new)))
+        self.load_view(new)
+        self.draw()
+        if not self.open_picker():
+            self.say("Both panes show this note; Option+W closes a pane", 5)
+
+    def close_pane(self):
+        if len(self.panes()) == 1:
+            self.say("This is the only pane; ^Q quits", 4)
+            return
+        b = self.buf
+        if b.dirty and sum(1 for p, _ in self.buffers() if (self.buf if p is self.pane else p.buf) is b) == 1:
+            if not self.safe_save():
+                return
+        sibling = self.layout.remove(self.pane)
+        self.pane = sibling.leaves()[0]  # the closed pane's state is simply dropped
+        for a in self.VIEW_ATTRS:
+            setattr(self, a, getattr(self.pane, a))
+        self.load_view(self.pane)
+
+    def next_pane(self):
+        panes = self.panes()
+        if len(panes) > 1:
+            self.activate(panes[(panes.index(self.pane) + 1) % len(panes)])
+
+    def pane_at(self, y, x):
+        for pane in self.panes():
+            py, px, ph, pw = pane.rect
+            if py <= y < py + ph and px <= x < px + pw:
+                return pane
+        return None
+
     def draw(self):
-        scr, b = self.scr, self.buf
+        scr = self.scr
         scr.erase()
         H, W = scr.getmaxyx()
         if H < 5 or W < 30:
             self.put(0, 0, "Window too small"[:W - 1])
             scr.refresh()
             return
-        self.rows = H - 2
-        textw = min(MAX_TEXT_WIDTH, W - 1)
-        self.left = 0
-        self.wrapw = textw - 1
+        for y, x, h in self.layout.place(0, 0, H - 1, W):  # separators between side-by-side panes
+            for r in range(h):
+                self.put(y + r, x, "│", self.A["dim"])
+        cursor = None
+        for pane in self.panes():
+            with self.viewing(pane):
+                c = self.draw_pane(*pane.rect, active=pane is self.pane)
+            if pane is self.pane:
+                cursor = c
+        x = 1
+        for key, label in HINTS:
+            if x + len(key) + len(label) + 2 >= W:
+                break
+            self.put(H - 1, x, key, self.A["key"])
+            self.put(H - 1, x + len(key) + 1, label, self.A["dim"])
+            x += len(key) + len(label) + 3
+
+        try:
+            curses.curs_set(1 if cursor else 0)  # scrolled away from the cursor: hide it
+        except curses.error:
+            pass
+        if cursor:
+            scr.move(*cursor)
+        sys.stdout.write("\x1b[?2026h")  # begin synchronised update (ignored where unsupported)
+        sys.stdout.flush()
+        scr.refresh()
+        sys.stdout.write("\x1b[?2026l")
+        sys.stdout.flush()
+
+    def draw_pane(self, top_y, left_x, height, width, active):
+        """Draw the current view into a rectangle: text rows, then this pane's status line.
+        Returns where the cursor goes (screen coordinates), or None."""
+        b = self.buf
+        H, W = self.scr.getmaxyx()
+        self.rows = max(1, height - 1)
+        textw = min(MAX_TEXT_WIDTH, width - 1)
+        self.left = left_x
+        self.wrapw = max(10, textw - 1)
         if self.free_view:  # keep the scrolled view; just make sure it's still inside the note
             self.top = min(self.top, len(b.lines) - 1)
             self.top_seg = min(self.top_seg, len(self.segs(self.top)) - 1)
@@ -1376,10 +1588,10 @@ class App:
                     r = j
                     while r < e and attrs[r] == attrs[j]:
                         r += 1
-                    self.put(y, self.left + j - a, line[j:r], attrs[j])
+                    self.put(top_y + y, self.left + j - a, line[j:r], attrs[j])
                     j = r
                 if i == b.cy and k == ck:
-                    cursor = (y, self.left + b.cx - a)
+                    cursor = (top_y + y, self.left + b.cx - a)
                 self.row_map.append((i, a, e, k == len(starts) - 1))
                 y += 1
             i, s = i + 1, 0
@@ -1389,35 +1601,18 @@ class App:
         name = os.path.relpath(path, NOTES_DIR) if path.startswith(NOTES_DIR + os.sep) else path
         words = sum(len(l.split()) for l in b.lines)
         left = f" {name}  {'● unsaved' if b.dirty else '✓ saved'}"
-        if time.time() < self.msg_until:
+        if active and time.time() < self.msg_until:
             left += f"   {self.msg}"
-        elif on_typo:
+        elif active and on_typo:
             left += "   ^W fix spelling"
-        elif self.speller and self.speller.state == "compiling":
+        elif active and self.speller and self.speller.state == "compiling":
             left += "   preparing spell check…"
         right = f"Ln {b.cy + 1}/{len(b.lines)}   {words:,} words "
-        bar = left + " " * max(1, W - 1 - len(left) - len(right)) + right
-        self.put(H - 2, 0, bar[:W - 1].ljust(W - 1), self.A["match" if self.save_failed else "bar"])
-
-        x = 1
-        for key, label in HINTS:
-            if x + len(key) + len(label) + 2 >= W:
-                break
-            self.put(H - 1, x, key, self.A["key"])
-            self.put(H - 1, x + len(key) + 1, label, self.A["dim"])
-            x += len(key) + len(label) + 3
-
-        try:
-            curses.curs_set(1 if cursor else 0)  # scrolled away from the cursor: hide it
-        except curses.error:
-            pass
-        if cursor:
-            scr.move(*cursor)
-        sys.stdout.write("\x1b[?2026h")  # begin synchronised update (ignored where unsupported)
-        sys.stdout.flush()
-        scr.refresh()
-        sys.stdout.write("\x1b[?2026l")
-        sys.stdout.flush()
+        barw = width - (1 if left_x + width >= W else 0)  # never write the screen's last cell
+        bar = left + " " * max(1, barw - len(left) - len(right)) + right
+        look = ("match" if self.save_failed else "bar") if active else "bar_off"
+        self.put(top_y + height - 1, left_x, bar[:barw].ljust(barw), self.A[look])
+        return cursor if active else None
 
     # Input helpers
     def get_key(self):
@@ -1433,7 +1628,7 @@ class App:
             first = self.get_key()
             if first in ("\r", "\n"):
                 return ("key", "shift-enter")  # Option+Enter on terminals using Option as Meta
-            if first in ("b", "f", "e"):
+            if first in ("b", "f", "e", "d", "D", "w", "o"):
                 return ("alt", first)
             if first not in ("[", "O"):
                 return None
@@ -1987,6 +2182,12 @@ class App:
     def mouse(self, button, x, y, pressed):
         """Click places the cursor, drag selects, Shift+click extends, wheel scrolls.
         Returns True to keep the selection."""
+        pane = self.pane_at(y, x)
+        if pane is None:
+            return self.anchor is not None
+        if pane is not self.pane:
+            self.activate(pane)  # clicking or scrolling a pane makes it the active one
+        y -= pane.rect[0]
         b = self.buf
         if button & 64:  # wheel (64 up, 65 down): move the view only, the cursor stays put
             self.scroll_view(3 if button & 1 else -3)
@@ -2059,7 +2260,8 @@ class App:
             if r[0] in ("paste", "mouse"):
                 return r
             if r[0] == "alt":
-                return {"b": "word-left", "f": "word-right", "e": "export"}[r[1]]
+                return {"b": "word-left", "f": "word-right", "e": "export", "d": "split-right",
+                        "D": "split-down", "w": "close-pane", "o": "next-pane"}[r[1]]
             return r[1]  # a curses key, a name, or None for keys we don't use
         if isinstance(key, int) and key != curses.KEY_RESIZE:
             return NAMED_KEYS.get(curses.keyname(key).decode(errors="ignore"), key)
@@ -2100,6 +2302,7 @@ class App:
         if key is None:
             pass
         elif isinstance(key, tuple) and key[0] == "mouse":
+            self.log_once("mouse events are arriving")
             keep_selection = self.mouse(*key[1])
         elif isinstance(key, tuple):  # bracketed paste
             if key[1]:
@@ -2128,7 +2331,7 @@ class App:
         elif key == "\x13":
             self.safe_save(announce=True)
         elif key == "\x11":
-            if self.save_if_dirty():
+            if all(self.save_pane_buffer(p) for p, _ in self.buffers()):
                 return "quit"
             self.say("Not quitting: the note couldn't be saved. " + self.msg, 3600)
         elif key == "\x03":
@@ -2158,6 +2361,14 @@ class App:
             self.fix_spelling()
         elif key == "\x14":
             self.insert_template()
+        elif key == "split-right":
+            self.split("v")
+        elif key == "split-down":
+            self.split("h")
+        elif key == "close-pane":
+            self.close_pane()
+        elif key == "next-pane":
+            self.next_pane()
         elif key in ("export", curses.KEY_F5):
             self.export()
         elif key == "\x0c":
@@ -2216,7 +2427,7 @@ class App:
         # Bracketed paste (pasted lists aren't re-bulleted) and modifyOtherKeys 1 (Shift+Enter differs from Enter)
         sys.stdout.write("\x1b[?2004h\x1b[>4;1m")
         if MOUSE_ON:  # button presses and drags, in the SGR format (wheel-down works, unlike X10)
-            sys.stdout.write("\x1b[?1002h\x1b[?1006h")
+            sys.stdout.write("\x1b[?1000h\x1b[?1002h\x1b[?1006h")
         sys.stdout.flush()
         write_running()
         self.exit_reason = "unknown"
@@ -2246,8 +2457,10 @@ class App:
                 if key is None:
                     if self.flash and time.time() >= self.flash[2]:
                         self.flash = None
-                    self.autosave()
-                    self.check_outside_change()
+                    for pane, _ in self.buffers():
+                        with self.viewing(pane):
+                            self.autosave()
+                            self.check_outside_change()
                     continue
                 # Apply everything already typed before redrawing, so fast typing never queues
                 quit = False
@@ -2265,8 +2478,10 @@ class App:
                     break
                 self.autosave()
         finally:
-            if self.buf and self.buf.dirty and not self.safe_save():
-                self.write_recovery()
+            for pane, b in (self.buffers() if self.buf else []):
+                with self.viewing(pane):
+                    if self.buf.dirty and not self.safe_save():
+                        self.write_recovery()
             self.history.snapshot(wait=True)
             clear_running()
             if sys.exc_info()[0] not in (None, SystemExit):
@@ -2275,7 +2490,7 @@ class App:
             if self.speller:
                 self.speller.close()
             try:
-                sys.stdout.write("\x1b[?2004l\x1b[>4;0m\x1b[?1006l\x1b[?1002l")
+                sys.stdout.write("\x1b[?2004l\x1b[>4;0m\x1b[?1006l\x1b[?1002l\x1b[?1000l")
                 sys.stdout.flush()
             except OSError:
                 pass  # the terminal may already be gone
