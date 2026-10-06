@@ -88,7 +88,10 @@ class ReleaseTests(unittest.TestCase):
         profile = os.path.join(self.share, "Law Notes.terminal")
         run("plutil", "-lint", profile)
         text = open(profile, encoding="utf-8").read()
-        self.assertIn(os.path.join(self.share, "current", "lawnotes") + "' --here", text)
+        window = os.path.join(self.share, "lawnotes-window")
+        self.assertIn(f"<string>{window}</string>", text)  # a bare path: Terminal runs it without a shell
+        self.assertTrue(os.access(window, os.X_OK))
+        self.assertIn('current/lawnotes" --here', open(window).read())
         self.assertIn("<key>$000D</key>", text)  # Shift+Return mapped for the editor
         self.assertTrue(os.path.islink(os.path.join(self.home, "UCL", "notes")) or
                         os.path.isdir(os.path.join(self.home, "UCL", "notes")))

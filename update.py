@@ -41,6 +41,7 @@ VERSIONS = os.path.join(ROOT, "versions")
 CURRENT = os.path.join(ROOT, "current")
 STATE = os.path.join(ROOT, "state.json")
 PROFILE = os.path.join(ROOT, "Law Notes.terminal")
+WINDOW = os.path.join(ROOT, "lawnotes-window")  # what the Law Notes window runs
 SIGNERS = os.path.expanduser(os.environ.get("LAWNOTES_SIGNERS", "~/.config/lawnotes/allowed_signers"))
 CACHE = os.path.expanduser("~/.cache/lawnotes")
 STAMP = os.path.join(CACHE, "last-update-check")
@@ -162,8 +163,14 @@ def build_profile(path):
     because the profile's key map holds a raw Escape character that plistlib refuses."""
     with open(os.path.join(path, "app", "Law Notes.terminal"), "rb") as f:
         template = f.read()
-    command = f"'{os.path.join(CURRENT, 'lawnotes')}' --here"
-    command = command.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # Terminal runs this command without a shell, so it must be a bare path: no quotes or arguments
+    with open(WINDOW + ".tmp", "w") as f:
+        f.write('#!/bin/bash\n# Run by the Law Notes window (its Terminal profile\'s command)\n'
+                'echo "$(date \'+%F %T\') window started" >> "$HOME/.cache/lawnotes/window.log"\n'
+                f'exec "{os.path.join(CURRENT, "lawnotes")}" --here\n')
+    os.chmod(WINDOW + ".tmp", 0o755)
+    os.replace(WINDOW + ".tmp", WINDOW)
+    command = WINDOW.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     assert template.count(b"__LAWNOTES_COMMAND__") == 1, "profile template has no command placeholder"
     with open(PROFILE + ".tmp", "wb") as f:
         f.write(template.replace(b"__LAWNOTES_COMMAND__", command.encode()))
