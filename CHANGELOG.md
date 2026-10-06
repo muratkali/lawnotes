@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.4
+
+- Scrolling a note crashed Law Notes when a misspelt word in italics (for example inside a case name) came into view: `curses.pair_number()` overflows on italic text with macOS's ncurses. Fixed, with a test.
+- Scrolling could close Law Notes: when a scroll event's first byte arrived more than ~55 ms before the rest (likely through herdr or on a busy Mac), it was read as Esc, which closes the note list. Escape sequences now get 250 ms to arrive.
+- A log of every start, every exit and why it happened, crashes with their details, and unrecognised key sequences, kept locally and in iCloud Drive → Law Notes Logs (one file per Mac).
+- Party labels are highlighted: D (defendant) orange, V (victim) pink, C (claimant) blue, including D1, D2 and D's.
+
 ## 1.1.3
 
 - Law Notes.app's window now starts the editor. Terminal runs a profile's command without a shell, so the quoted command did nothing; the window now runs a small `lawnotes-window` script by its plain path, and logs each start to `~/.cache/lawnotes/window.log`.

@@ -125,6 +125,25 @@ class TextTests(unittest.TestCase):
         self.assertEqual([m.group() for m in lawnotes.STATUTE_RE.finditer("s 2(1) of the Human Rights Act 1998")],
                          ["s 2(1)", "Human Rights Act 1998"])
 
+    def test_italic_typo_does_not_crash(self):
+        """Scrolling tort.md crashed: pair_number() overflowed on an italic misspelt word."""
+        import curses
+        self.assertEqual(lawnotes.pair_of(curses.A_ITALIC | curses.A_BOLD | (3 << 8)), 3)
+
+        class Speller:
+            def lookup(self, line):
+                return ((0, 3),)  # "teh"
+        app = object.__new__(lawnotes.App)
+        app.speller, app.ignored, app.protected = Speller(), set(), {9}
+        app.highlight = lambda line: [curses.A_ITALIC | (1 << 8)] * len(line)
+        self.assertEqual(app.misspelt("teh case"), [(0, 3)])
+
+    def test_party_labels(self):
+        found = lambda t: [m.group() for m in lawnotes.PARTY_RE.finditer(t)]
+        self.assertEqual(found("D punched V. C sued D1 and D2."), ["D", "V", "C", "D1", "D2"])
+        self.assertEqual(found("D's intention"), ["D's"])
+        self.assertEqual(found("Part V of the Act; a C-section"), [])
+
     def test_wrap(self):
         self.assertEqual(lawnotes.wrap_starts("hello world foo", 8), (0, 6, 12))
         self.assertEqual(lawnotes.wrap_starts("x" * 20, 8), (0, 8, 16))
@@ -182,6 +201,36 @@ class Session:
 
 
 class SessionTests(unittest.TestCase):
+    def test_split_scroll_events_neither_close_nor_type(self):
+        """A scroll event whose ESC arrives 120 ms before the rest (seen through herdr)."""
+        wheel = b"\x1b[<65;50;10M"
+        s = Session()  # the note list
+        for _ in range(3):
+            os.write(s.fd, wheel[:1]); time.sleep(0.12); os.write(s.fd, wheel[1:]); s.read(0.2)
+        self.assertEqual(os.waitpid(s.pid, os.WNOHANG)[0], 0, "the note list closed")
+        s.keys(b"\x11", 1)
+        os.waitpid(s.pid, 0)
+        note = os.path.join(lawnotes.NOTES_DIR, "Scroll.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("".join(f"line {i}\n" for i in range(60)))
+        s = Session(note)
+        for _ in range(3):
+            os.write(s.fd, wheel[:1]); time.sleep(0.12); os.write(s.fd, wheel[1:]); s.read(0.2)
+        s.keys(b"\x13", 0.5)
+        self.assertTrue(s.quit())
+        self.assertNotIn("<65", open(note).read())
+
+    def test_exit_reason_logged_locally_and_in_icloud(self):
+        icloud = os.path.join(os.environ["HOME"], "Library", "Mobile Documents", "com~apple~CloudDocs")
+        os.makedirs(icloud, exist_ok=True)
+        s = Session("Logged")
+        self.assertTrue(s.quit())
+        local = open(lawnotes.LOG_FILE).read()
+        self.assertIn("exited: quit with ^Q", local)
+        logs = os.listdir(os.path.join(icloud, "Law Notes Logs"))
+        self.assertEqual(len(logs), 1)
+        self.assertIn("exited: quit with ^Q", open(os.path.join(icloud, "Law Notes Logs", logs[0])).read())
+
     def test_type_save_quit(self):
         s = Session("Contract/Offer")
         path = os.path.join(lawnotes.NOTES_DIR, "Contract", "Offer.md")

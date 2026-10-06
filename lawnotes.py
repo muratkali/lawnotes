@@ -53,7 +53,7 @@ import traceback
 import unicodedata
 from functools import lru_cache
 
-VERSION = "1.1.3"
+VERSION = "1.1.4"
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
 NOTES_DIR = os.path.abspath(os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes")))
 NOTE_EXTS = (".md", ".txt")
@@ -74,6 +74,10 @@ BUNDLE_EVERY = 7 * 24 * 3600
 RUNNING_FILE = os.path.join(CACHE_DIR, "running.json")      # single instance: who has Law Notes open
 REQUEST_FILE = os.path.join(CACHE_DIR, "open-request.json")  # the launcher asks the open editor to open a note
 MESSAGE_FILE = os.path.join(CACHE_DIR, "update-message")     # written by update.py
+LOG_FILE = os.path.join(CACHE_DIR, "lawnotes.log")           # starts, exits and why, crashes
+ICLOUD_LOGS = os.path.join(ICLOUD_DIR, "Law Notes Logs")     # the same log, one file per Mac
+ESCAPE_WAIT = 250  # ms to wait for the rest of an escape sequence: through herdr or a busy Mac,
+                   # a scroll event's ESC can arrive well before the rest (it closed the note list)
 SNAPSHOT_EVERY = 600  # seconds between automatic snapshots while you work
 # Only notes go into history: no PDFs or other files kept in the notes folder.
 HISTORY_EXCLUDE = "*\n!*/\n!*.md\n!*.txt\n.*\n*~\n"
@@ -173,10 +177,19 @@ STATUTE_RE = re.compile(
     r"\b(?:ss?|arts?|regs?|sch|para|[Ss]ection|[Aa]rticle)\.?\s?\d+[A-Z]*(?:\(\w+\))*"
     rf"|\b{_STOP}(?:[A-Z][a-z]+\s+)+(?:\([A-Za-z ]+\)\s+)?Act\s+\d{{4}}"
 )
+# Party labels in problem answers: D (defendant), V (victim), C (claimant), also D1, D's.
+# Not after Part/Schedule/Chapter, where V is a Roman numeral.
+PARTY_RE = re.compile(r"(?<!Part )(?<!Schedule )(?<!Chapter )(?<!Book )\b([DVC])\d?(?:['\u2019]s)?\b(?!-)")
 HEADING_RE = re.compile(r"^(#{1,6})\s")
 BULLET_RE = re.compile(r"^(\s*)([-*+]|\d+[.)]|>)(\s+)(\[[ xX]\]\s+)?")
 BOLD_RE = re.compile(r"\*\*[^*]+\*\*")
 ITALIC_RE = re.compile(r"(?<![*\w])[*_][^*_\s][^*_]*[*_](?![*\w])")
+
+
+def pair_of(attr):
+    """The colour pair inside a curses attribute. curses.pair_number() overflows on attributes
+    that include A_ITALIC (bit 31) with macOS's ncurses: it crashed drawing italic typos."""
+    return (attr & curses.A_COLOR) >> 8
 
 
 def next_marker(marker):
@@ -826,6 +839,8 @@ HELP = [
     ("**bold**", "Bold;  *italic*  italic."),
     ("#", "Colours"),
     ("", "Case names gold, citations like [1932] AC 562 pink, statutes like s 2(1) or Human Rights Act 1998 green, misspelt words highlighted in red."),
+    ("D  V  C", "Party labels in problem answers: D (defendant) orange, V (victim) pink, C (claimant) blue; also D1, D2, D's."),
+    ("", "If Law Notes ever closes or crashes unexpectedly, the reason is logged in iCloud Drive → Law Notes Logs."),
     ("", "Notes are plain Markdown files in ~/UCL/notes, which points to iCloud Drive → UCL Notes, so they're backed up off this Mac and open on iPhone or iPad (Files app). Any other app can open them too."),
 ]
 ENTER = ("\n", "\r", curses.KEY_ENTER)
@@ -899,6 +914,9 @@ class App:
             "dim":     ((174, 52), (C.COLOR_WHITE, C.COLOR_RED)),
             "sel":     ((16, 208), (C.COLOR_BLACK, C.COLOR_YELLOW)),
             "spell":   ((231, 160), (C.COLOR_WHITE, C.COLOR_MAGENTA)),
+            "party_D": ((16, 214), (C.COLOR_BLACK, C.COLOR_YELLOW)),
+            "party_V": ((16, 218), (C.COLOR_BLACK, C.COLOR_MAGENTA)),
+            "party_C": ((16, 117), (C.COLOR_BLACK, C.COLOR_CYAN)),
         }
         pairs = {}
         for n, (role, (c256, c8)) in enumerate(palette.items(), start=1):
@@ -908,7 +926,7 @@ class App:
             else:
                 pairs[role] = curses.A_REVERSE if role in ("match", "bar", "key", "sel") else 0
         # Words inside case names, citations and statutes are never marked as misspelt
-        self.protected = {curses.pair_number(pairs[r]) for r in ("case", "cite", "statute")} if colors else set()
+        self.protected = {pair_of(pairs[r]) for r in ("case", "cite", "statute")} if colors else set()
         self.scr.bkgd(" ", pairs["text"])
 
         self.A = {
@@ -926,8 +944,17 @@ class App:
             "dim": pairs["dim"],
             "sel": pairs["sel"] | curses.A_BOLD,
             "spell": pairs["spell"] | curses.A_UNDERLINE,
+            "party_D": pairs["party_D"] | curses.A_BOLD,
+            "party_V": pairs["party_V"] | curses.A_BOLD,
+            "party_C": pairs["party_C"] | curses.A_BOLD,
         }
         self.italic = italic
+
+    def log_once(self, event):
+        seen = self.__dict__.setdefault("_logged", set())
+        if event not in seen and len(seen) < 30:
+            seen.add(event)
+            log(event)
 
     def say(self, msg, secs=4):
         self.msg, self.msg_until = msg, time.time() + secs
@@ -1126,6 +1153,8 @@ class App:
         else:
             quote = line.lstrip().startswith(">")
             attrs = [A["quote"] if quote else A["text"]] * n
+            for mm in PARTY_RE.finditer(line):
+                attrs[mm.start():mm.end()] = [A["party_" + mm.group(1)]] * (mm.end() - mm.start())
             for rx, key in ((STATUTE_RE, "statute"), (CITE_RE, "cite"), (CASE_RE, "case")):
                 for mm in rx.finditer(line):
                     attrs[mm.start():mm.end()] = [A[key]] * (mm.end() - mm.start())
@@ -1251,7 +1280,7 @@ class App:
 
     def read_escape(self):
         """After ESC: ('paste', text), ('alt', 'b'|'f'), ('key', name) or None for a plain Esc."""
-        self.scr.timeout(30)
+        self.scr.timeout(ESCAPE_WAIT)
         try:
             first = self.get_key()
             if first in ("\r", "\n"):
@@ -1273,6 +1302,8 @@ class App:
             m = re.fullmatch(r"\[<(\d+);(\d+);(\d+)([Mm])", seq)  # SGR mouse report
             if m:
                 return ("mouse", (int(m.group(1)), int(m.group(2)) - 1, int(m.group(3)) - 1, m.group(4) == "M"))
+            if seq not in CSI_KEYS:
+                self.log_once("unrecognised key sequence ESC" + repr(seq)[1:-1])
             return ("key", CSI_KEYS.get(seq))  # None: a key we don't use, swallowed whole
         finally:
             self.scr.timeout(1000)
@@ -1414,7 +1445,7 @@ class App:
             word = line[a:e]
             if (not word or word[0].isupper() or any(c.isdigit() for c in word)
                     or word.lower() in LAW_WORDS or word.lower() in self.ignored
-                    or any(curses.pair_number(hl[k]) in self.protected for k in range(a, e))):
+                    or any(pair_of(hl[k]) in self.protected for k in range(a, e))):
                 continue
             out.append((a, e))
         return out
@@ -1946,6 +1977,8 @@ class App:
     def run(self, path):
         # Closing the pane, quitting herdr or closing Terminal sends SIGHUP: save on the way out
         def stop(signum, frame):
+            self.exit_reason = {signal.SIGHUP: "window or pane closed (SIGHUP)",
+                                signal.SIGTERM: "asked to quit (SIGTERM)"}.get(signum, f"signal {signum}")
             raise SystemExit(0)
         for sig in (signal.SIGHUP, signal.SIGTERM):
             signal.signal(sig, stop)
@@ -1955,12 +1988,18 @@ class App:
             sys.stdout.write("\x1b[?1002h\x1b[?1006h")
         sys.stdout.flush()
         write_running()
+        self.exit_reason = "unknown"
+        H, W = self.scr.getmaxyx()
+        where = (f"herdr pane {os.environ['HERDR_PANE_ID']}" if os.environ.get("HERDR_PANE_ID")
+                 else os.environ.get("TERM_PROGRAM", "a terminal"))
+        log(f"started Law Notes {VERSION} in {where}, {W}x{H}")
         try:
             if not path:
                 path = take_request()  # the launcher asked for a note before this window opened
             if path:
                 self.open(path)
             elif not self.open_picker():
+                self.exit_reason = "note list closed before opening a note (Esc or ^Q)"
                 return
             if time.time() >= self.msg_until:
                 self.say("Tip: ^G shows every shortcut")
@@ -1989,6 +2028,7 @@ class App:
                     if key is None:
                         break
                 if quit:
+                    self.exit_reason = "quit with ^Q"
                     break
                 self.autosave()
         finally:
@@ -1996,6 +2036,9 @@ class App:
                 self.write_recovery()
             self.history.snapshot(wait=True)
             clear_running()
+            if sys.exc_info()[0] not in (None, SystemExit):
+                self.exit_reason = "crashed (see the traceback below)"
+            log("exited: " + self.exit_reason)
             if self.speller:
                 self.speller.close()
             try:
@@ -2003,6 +2046,27 @@ class App:
                 sys.stdout.flush()
             except OSError:
                 pass  # the terminal may already be gone
+
+
+def log(event, detail=""):
+    """Append to this Mac's Law Notes log, locally and in iCloud Drive (if it's on), so a close
+    or crash can be explained afterwards. Never raises; keeps each file under ~200 KB."""
+    line = f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} [{os.getpid()}] {event}\n" + detail
+    targets = [LOG_FILE]
+    if os.path.isdir(ICLOUD_DIR):
+        targets.append(os.path.join(ICLOUD_LOGS, History.mac_name() + ".log"))
+    for path in targets:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            if os.path.exists(path) and os.path.getsize(path) > 200_000:
+                with open(path) as f:
+                    keep = f.read()[-100_000:]
+                with open(path, "w") as f:
+                    f.write(keep)
+            with open(path, "a") as f:
+                f.write(line)
+        except OSError:
+            pass
 
 
 def resolve_note(arg):
@@ -2124,13 +2188,10 @@ def main():
     try:
         curses.wrapper(lambda scr: App(scr).run(path))
     except Exception:
-        os.makedirs(CACHE_DIR, exist_ok=True)
-        log = os.path.join(CACHE_DIR, "crash.log")
-        with open(log, "a") as f:
-            f.write(f"\n--- {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n")
-            traceback.print_exc(file=f)
+        log("CRASH", traceback.format_exc())
+        where = "iCloud Drive → Law Notes Logs" if os.path.isdir(ICLOUD_DIR) else LOG_FILE
         print(f"lawnotes stopped with an error. Your note was saved first if at all possible "
-              f"(otherwise see {CACHE_DIR}/recovery). Details: {log}", file=sys.stderr)
+              f"(otherwise see {CACHE_DIR}/recovery). Details are in {where}.", file=sys.stderr)
         sys.exit(1)
 
 
