@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1
+
+- Copying is unmistakable: what ^C copied flashes green and the status bar says "✓ Copied N words". Help explains that ⌘C can't copy text selected inside Law Notes (Terminal takes it); use ^C.
+
 ## 1.2.0
 
 - Export to Word (.docx) or PDF with Option+E (or F5), or `lawnotes --export NOTE docx|pdf`, into Downloads. Case names are put in italics (OSCOLA), `[^1]` footnotes become real Word footnotes, each line of a note stays a line, and Times New Roman 12 with 1.5 spacing is used. Word export needs pandoc (`brew install pandoc`); PDF is made by macOS itself, no LaTeX needed.

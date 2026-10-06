@@ -53,7 +53,7 @@ import traceback
 import unicodedata
 from functools import lru_cache
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
 NOTES_DIR = os.path.abspath(os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes")))
 NOTE_EXTS = (".md", ".txt")
@@ -954,7 +954,7 @@ HELP = [
     ("Shift+arrows", "Select text (Shift+Option+arrows selects by word). Click with the mouse to place the cursor, drag to select."),
     ("Double-click", "Selects a word, or a whole case name, citation or statute. Triple-click selects the line."),
     ("Scroll", "The mouse wheel moves the view only; the cursor stays where it was, and typing carries on there."),
-    ("^C  ^X  ^V", "Copy / cut / paste using the Mac clipboard. With nothing selected, ^C and ^X take the whole line. ⌘V works too."),
+    ("^C  ^X  ^V", "Copy / cut / paste using the Mac clipboard: what you copy flashes green. With nothing selected, ^C and ^X take the whole line. ⌘V pastes too, but ⌘C can't copy text selected inside Law Notes (Terminal takes ⌘C): use ^C."),
     ("Typing", "With text selected, typing or Backspace replaces it."),
     ("*  _", "With text selected, * wraps it in *italics*; press again for **bold**. _ works the same way."),
     ("#", "Editing"),
@@ -1014,7 +1014,7 @@ class App:
         self.ignored = set()
         self.anchor = None      # selection start (line, col); the cursor is the other end
         self.free_view = False  # scrolled with the wheel: the view moves, the cursor stays put
-        self.flash = None       # ((line, col), (line, col), until): what ^C just copied, shown briefly
+        self.flash = None       # ((line, col), (line, col), until): what ^C just copied, flashed green
         self.last_click = (0.0, None, 0)  # time, position, count: for double and triple clicks
         self.hold_selection = False       # a double/triple click's release mustn't collapse it
         self.row_map = []       # screen row -> (line, start, end, last segment) for mouse clicks
@@ -1051,6 +1051,7 @@ class App:
             "party_D": ((16, 214), (C.COLOR_BLACK, C.COLOR_YELLOW)),
             "party_V": ((16, 218), (C.COLOR_BLACK, C.COLOR_MAGENTA)),
             "party_C": ((16, 117), (C.COLOR_BLACK, C.COLOR_CYAN)),
+            "copied":  ((16, 120), (C.COLOR_BLACK, C.COLOR_GREEN)),
         }
         pairs = {}
         for n, (role, (c256, c8)) in enumerate(palette.items(), start=1):
@@ -1081,6 +1082,7 @@ class App:
             "party_D": pairs["party_D"] | curses.A_BOLD,
             "party_V": pairs["party_V"] | curses.A_BOLD,
             "party_C": pairs["party_C"] | curses.A_BOLD,
+            "copied": pairs["copied"] | curses.A_BOLD,
         }
         self.italic = italic
 
@@ -1351,12 +1353,13 @@ class App:
                     attrs[a:e] = [self.A["spell"]] * (e - a)
                     if i == b.cy and a <= b.cx < e:
                         on_typo = True
-            for span in (sel, self.flash[:2] if self.flash and time.time() < self.flash[2] else None):
+            flash = self.flash[:2] if self.flash and time.time() < self.flash[2] else None
+            for span, look in ((sel, "sel"), (flash, "copied")):
                 if span and span[0][0] <= i <= span[1][0]:
                     attrs = attrs[:]
                     s0 = span[0][1] if i == span[0][0] else 0
                     s1 = span[1][1] if i == span[1][0] else len(line)
-                    attrs[s0:s1] = [self.A["sel"]] * (s1 - s0)
+                    attrs[s0:s1] = [self.A[look]] * (s1 - s0)
             if q and q in line.lower():
                 attrs = attrs[:]
                 low, j = line.lower(), line.lower().find(q)
@@ -1952,15 +1955,17 @@ class App:
             text = b.lines[b.cy] + "\n"
         self.clip_text = text
         where = "clipboard" if clipboard_set(text) else "editor clipboard"
-        if not cut and not self.selection():  # show which line was copied, without selecting it
-            self.flash = ((b.cy, 0), (b.cy, len(b.lines[b.cy])), time.time() + 0.8)
+        if not cut:  # flash what was copied green (a whole line isn't selected, so typing can't replace it)
+            span = self.selection() or ((b.cy, 0), (b.cy, len(b.lines[b.cy])))
+            self.flash = (span[0], span[1], time.time() + 0.7)
         words = len(text.split())
         if cut:
             if self.selection():
                 self.delete_selection()
             else:
                 b.cut_line()
-        self.say(f"{'Cut' if cut else 'Copied'} {words} word{'s' * (words != 1)} to the {where}")
+        what = f"{words} word{'s' * (words != 1)}" if words else "it"
+        self.say(f"✓ {'Cut' if cut else 'Copied'} {what} to the {where}" + ("" if cut else " — paste with ^V or ⌘V"), 5)
 
     def paste_clipboard(self):
         text = clipboard_get()
@@ -2235,10 +2240,12 @@ class App:
                     self.speller.poll()
                 self.draw()
                 busy = self.speller and self.speller.busy
-                self.scr.timeout(50 if busy else 1000)
+                self.scr.timeout(50 if busy or self.flash else 1000)  # redraw promptly when a flash ends
                 key = self.get_key()
                 self.scr.timeout(1000)
                 if key is None:
+                    if self.flash and time.time() >= self.flash[2]:
+                        self.flash = None
                     self.autosave()
                     self.check_outside_change()
                     continue

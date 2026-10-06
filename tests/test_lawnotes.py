@@ -282,8 +282,11 @@ class SessionTests(unittest.TestCase):
         s = Session(note, env={"PATH": fake + os.pathsep + os.environ["PATH"]})
         screen = s.keys(b"\x1b[<65;10;10M" * 6, 0.6)                 # wheel down 18 rows
         self.assertIn("44", screen)  # the view moved: rows beyond the first screen were drawn
-        s.keys(b"\x03", 0.5)                                              # copy with nothing selected
+        out = s.keys(b"\x03", 0.3)                                        # copy with nothing selected
         self.assertEqual(open(clip).read(), "line 0\n")                 # the cursor's line, not the view's
+        self.assertIn("Copied 2 words", out)                              # the status bar says so
+        flashed = s.out[-4000:]
+        self.assertIn(b"48;5;120", flashed)                               # and the line flashed green
         s.keys(b"Q\x13", 0.5)                                             # typing goes where the cursor was
         self.assertTrue(s.quit())
         self.assertEqual(open(note).read().splitlines()[0], "Qline 0")    # the flash didn't select it
