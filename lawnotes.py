@@ -53,7 +53,7 @@ import traceback
 import unicodedata
 from functools import lru_cache
 
-VERSION = "1.1.6"
+VERSION = "1.2.0"
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
 NOTES_DIR = os.path.abspath(os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes")))
 NOTE_EXTS = (".md", ".txt")
@@ -641,6 +641,132 @@ class Speller:
 
 # --- Clipboard and version history -------------------------------------------
 
+# --- Export to Word and PDF -----------------------------------------------------
+
+EXPORT_DIR = os.path.expanduser(os.environ.get("LAWNOTES_EXPORT_DIR", "~/Downloads"))
+EXPORT_CSS = """html { color-scheme: light; }
+body { font-family: "Times New Roman", Times, serif; font-size: 12pt; line-height: 1.5;
+       color: #000; background: #fff; }
+h1 { font-size: 16pt; } h2 { font-size: 14pt; } h3 { font-size: 12pt; }
+.footnotes, section.footnotes { font-size: 10pt; }"""
+
+
+class ExportError(Exception):
+    pass
+
+
+def find_tool(name):
+    """Find a program even when Law Notes runs with the minimal PATH macOS gives apps."""
+    extra = ["/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.local/bin")]
+    return shutil.which(name, path=os.pathsep.join([os.environ.get("PATH", "")] + extra))
+
+
+def export_markdown(lines):
+    """A note as Markdown for pandoc: case names in italics (OSCOLA), and indented lines that
+    aren't part of a list kept as text (Markdown would otherwise turn them into code blocks)."""
+    out, in_list = [], False  # in_list: the last non-blank line belongs to a list
+    for line in lines:
+        stripped = line.lstrip(" ")
+        indent = len(line) - len(stripped)
+        if re.fullmatch(r"[-*+]\s*", stripped):  # an empty bullet carries nothing, and a lone "-"
+            continue                              # under text can make pandoc see a table or heading
+        if stripped:
+            if indent >= 4 and not in_list:  # indentation outside a list is layout, not code
+                line, indent = stripped, 0
+            if BULLET_RE.match(line) and not stripped.startswith(">"):
+                in_list = True
+            elif indent == 0:
+                in_list = False
+        if not HEADING_RE.match(line):
+            line = CASE_RE.sub(lambda m: m.group() if line[max(0, m.start() - 1):m.start()] in ("*", "_")
+                               else f"*{m.group()}*", line)
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
+def compiled_helper(name):
+    """A small Swift helper shipped as app/<name>.swift, compiled once into the cache."""
+    source = os.path.join(APP_DIR, "app", name + ".swift")
+    exe = os.path.join(CACHE_DIR, name)
+    with open(source, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    stamp = exe + ".sha256"
+    if not (os.path.exists(exe) and os.path.exists(stamp) and open(stamp).read() == digest):
+        if not find_tool("swiftc"):
+            raise ExportError("PDF export needs Apple's Command Line Tools (xcode-select --install)")
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        r = subprocess.run([find_tool("swiftc"), "-O", source, "-o", exe], capture_output=True, text=True, timeout=600)
+        if r.returncode != 0:
+            raise ExportError("couldn't build the PDF helper: " + r.stderr.strip()[-200:])
+        with open(stamp, "w") as f:
+            f.write(digest)
+    return exe
+
+
+def reference_docx(pandoc):
+    """pandoc's Word template with Times New Roman and 1.5 line spacing, made once per pandoc."""
+    version = subprocess.run([pandoc, "--version"], capture_output=True, text=True).stdout.split("\n")[0]
+    path = os.path.join(CACHE_DIR, "reference-" + re.sub(r"[^\w.]", "_", version) + ".docx")
+    if os.path.exists(path):
+        return path
+    import zipfile
+    raw = subprocess.run([pandoc, "--print-default-data-file", "reference.docx"], capture_output=True).stdout
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    src = path + ".src"
+    with open(src, "wb") as f:
+        f.write(raw)
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(path + ".tmp", "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "word/styles.xml":
+                xml = data.decode("utf-8")
+                xml = re.sub(r"<w:rFonts [^>]*/>", '<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" '
+                             'w:cs="Times New Roman" w:eastAsia="Times New Roman"/>', xml)
+                xml = xml.replace("<w:pPrDefault>", '<w:pPrDefault><w:pPr><w:spacing w:line="360" w:lineRule="auto"/></w:pPr>', 1) \
+                    if "<w:pPrDefault/>" not in xml and "<w:pPrDefault><w:pPr>" not in xml else xml
+                data = xml.encode("utf-8")
+            zout.writestr(item, data)
+    os.remove(src)
+    os.replace(path + ".tmp", path)
+    return path
+
+
+def export_note(path, lines, fmt):
+    """Write the note as .docx or .pdf into EXPORT_DIR; returns the new file's path."""
+    pandoc = find_tool("pandoc")
+    if not pandoc:
+        raise ExportError("export needs pandoc: run  brew install pandoc  (free)")
+    name = os.path.splitext(os.path.basename(path))[0]
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+    out = os.path.join(EXPORT_DIR, f"{name}.{fmt}")
+    text = export_markdown(lines)
+    # each line of a note stays a line; no "simple tables", which plain notes trigger by accident
+    source = "markdown+hard_line_breaks-simple_tables-multiline_tables"
+    if fmt == "docx":
+        r = subprocess.run([pandoc, "-f", source, "-t", "docx", "--reference-doc", reference_docx(pandoc),
+                            "-o", out], input=text, capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            raise ExportError(r.stderr.strip()[-200:] or "pandoc failed")
+        return out
+    if fmt == "pdf":
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            html, css = os.path.join(d, "note.html"), os.path.join(d, "note.css")
+            with open(css, "w") as f:
+                f.write(EXPORT_CSS)  # our own stylesheet replaces pandoc's (which follows dark mode)
+            r = subprocess.run([pandoc, "-f", source, "-t", "html5", "-s", "--metadata", f"pagetitle={name}",
+                                "-c", css, "--embed-resources", "-o", html],
+                               input=text, capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                raise ExportError(r.stderr.strip()[-200:] or "pandoc failed")
+            r = subprocess.run([compiled_helper("html2pdf"), html, os.path.abspath(out)],
+                               capture_output=True, text=True, timeout=120)
+            if r.returncode != 0 or not os.path.exists(out):
+                raise ExportError("couldn't make the PDF")
+        return out
+    raise ExportError(f"unknown format {fmt}")
+
+
 def clean_text(text):
     """Pasted text: keep special spaces (as spaces) and line separators, drop control codes."""
     text = unicodedata.normalize("NFC", text.replace("\r\n", "\n").replace("\r", "\n").expandtabs(4))
@@ -835,6 +961,7 @@ HELP = [
     ("^K", "Cut the line (press repeatedly to cut several lines)."),
     ("^U", "Paste the cut lines above the cursor."),
     ("^Z  ^Y", "Undo / redo."),
+    ("Option+E", "Export the note to Word (.docx) or PDF, into Downloads. Case names are put in italics (OSCOLA), [^1] footnotes become real footnotes. F5 does the same."),
     ("^R", "Version history: snapshots of your notes are taken automatically every few minutes while you work. Pick one to restore it (^Z undoes the restore)."),
     ("#", "Formatting (Markdown)"),
     ("# Title", "Heading;  ## Section  for a subheading."),
@@ -1064,10 +1191,10 @@ class App:
             with open(REQUEST_FILE) as f:
                 req = json.load(f)
             os.remove(REQUEST_FILE)
-            if req.get("note") and time.time() - req.get("time", 0) < 120:
-                path = resolve_note(req["note"])
-                self.goto(path, 0) if os.path.exists(path) else self.open(path)
-        except (OSError, ValueError):
+            path = requested_note(req)
+            if path:
+                self.goto(path, 0)
+        except (OSError, ValueError, TypeError):
             pass
         try:
             with open(MESSAGE_FILE) as f:
@@ -1110,10 +1237,11 @@ class App:
             return False
         action, arg = choice
         if action == "new":
-            name = arg.strip("/")
-            if not name.endswith(NOTE_EXTS):
-                name += ".md"
-            arg = os.path.join(NOTES_DIR, name)
+            try:
+                arg = note_path(arg)
+            except ValueError as e:
+                self.say(str(e), 6)
+                return False
         return self.open(arg)
 
     # Layout helpers
@@ -1302,7 +1430,7 @@ class App:
             first = self.get_key()
             if first in ("\r", "\n"):
                 return ("key", "shift-enter")  # Option+Enter on terminals using Option as Meta
-            if first in ("b", "f"):
+            if first in ("b", "f", "e"):
                 return ("alt", first)
             if first not in ("[", "O"):
                 return None
@@ -1756,10 +1884,10 @@ class App:
         name = self.prompt("New note (e.g. Contract/Offer and Acceptance): ")
         if not name or not name.strip("/ "):
             return
-        name = name.strip("/ ")
-        if not name.endswith(NOTE_EXTS):
-            name += ".md"
-        self.open(os.path.join(NOTES_DIR, name))
+        try:
+            self.open(note_path(name))
+        except ValueError as e:
+            self.say(str(e), 6)
 
     # Selection, clipboard, mouse
     def selection(self):
@@ -1787,6 +1915,24 @@ class App:
         b.lines[y1:y2 + 1] = [b.lines[y1][:x1] + b.lines[y2][x2:]]
         b.cy, b.cx = y1, x1
         self.anchor = None
+
+    def export(self):
+        choice = self.pick("Export this note — saved to " + EXPORT_DIR.replace(os.path.expanduser("~"), "~", 1),
+                           lambda q: [(label, fmt) for label, fmt in (
+                               ("Word document (.docx) — footnotes stay footnotes", "docx"),
+                               ("PDF (A4, Times 12, footnotes as endnotes)", "pdf"))
+                               if q.lower() in label.lower()])
+        if not choice:
+            return
+        self.safe_save()
+        self.say("Exporting…", 30)
+        self.draw()
+        try:
+            out = export_note(self.buf.path, self.buf.lines, choice)
+            self.say("Exported to " + out.replace(os.path.expanduser("~"), "~", 1), 10)
+            log(f"exported {os.path.basename(self.buf.path)} as {choice}")
+        except (ExportError, OSError, subprocess.SubprocessError) as e:
+            self.say(f"Export failed: {e}", 12)
 
     def wrap_selection(self, mark):
         (y1, x1), (y2, x2) = self.selection()
@@ -1908,7 +2054,7 @@ class App:
             if r[0] in ("paste", "mouse"):
                 return r
             if r[0] == "alt":
-                return "word-left" if r[1] == "b" else "word-right"
+                return {"b": "word-left", "f": "word-right", "e": "export"}[r[1]]
             return r[1]  # a curses key, a name, or None for keys we don't use
         if isinstance(key, int) and key != curses.KEY_RESIZE:
             return NAMED_KEYS.get(curses.keyname(key).decode(errors="ignore"), key)
@@ -2007,6 +2153,8 @@ class App:
             self.fix_spelling()
         elif key == "\x14":
             self.insert_template()
+        elif key in ("export", curses.KEY_F5):
+            self.export()
         elif key == "\x0c":
             self.outline()
         elif key == "\x0b":
@@ -2147,14 +2295,45 @@ def log(event, detail=""):
             pass
 
 
+def inside_notes(path):
+    notes = os.path.realpath(NOTES_DIR)
+    return os.path.realpath(path).startswith(notes + os.sep)
+
+
+def note_path(name):
+    """A note name ('Tort/Duty') as a path in the notes folder. Raises ValueError for names that
+    would leave the folder ('../../x') or contain control characters."""
+    if CONTROL_RE.search(name):
+        raise ValueError("a note name can't contain control characters")
+    path = os.path.normpath(os.path.join(NOTES_DIR, name.strip().strip("/")))
+    if not path.endswith(NOTE_EXTS):
+        path += ".md"
+    if not inside_notes(path):
+        raise ValueError(f"“{name}” would be outside the notes folder")
+    return path
+
+
 def resolve_note(arg):
     """'Tort/Duty' means ~/UCL/notes/Tort/Duty.md; an existing file path is used as is."""
-    arg = os.path.expanduser(arg.strip())
-    if not os.path.isabs(arg) and not os.path.exists(arg):
-        arg = os.path.join(NOTES_DIR, arg)
-        if not arg.endswith(NOTE_EXTS):
-            arg += ".md"
-    return os.path.abspath(arg)
+    if CONTROL_RE.search(arg):
+        raise ValueError("a note name can't contain control characters")
+    path = os.path.expanduser(arg.strip())
+    if not os.path.isabs(path) and not os.path.exists(path):
+        return note_path(path)
+    return os.path.abspath(path)
+
+
+def requested_note(req):
+    """A note asked for through REQUEST_FILE, which any program on this Mac could write: only
+    notes inside the notes folder, or existing .md/.txt files, are accepted."""
+    if not (isinstance(req, dict) and isinstance(req.get("note"), str) and req["note"]
+            and time.time() - float(req.get("time", 0)) < 120):
+        return None
+    path = resolve_note(req["note"])
+    if inside_notes(path) or (os.path.isfile(path) and path.endswith(NOTE_EXTS)):
+        return path
+    log("ignored a request to open " + repr(path) + " (not a note)")
+    return None
 
 
 def take_request():
@@ -2162,9 +2341,8 @@ def take_request():
         with open(REQUEST_FILE) as f:
             req = json.load(f)
         os.remove(REQUEST_FILE)
-        if req.get("note") and time.time() - req.get("time", 0) < 120:
-            return resolve_note(req["note"])
-    except (OSError, ValueError):
+        return requested_note(req)
+    except (OSError, ValueError, TypeError):
         pass
     return None
 
@@ -2253,13 +2431,28 @@ def main():
     args = sys.argv[1:]
     if args and args[0] == "--self-test":
         sys.exit(self_test())
+    if args and args[0] == "--export":
+        if len(args) != 3 or args[2] not in ("docx", "pdf"):
+            print("usage: lawnotes --export NOTE docx|pdf", file=sys.stderr)
+            sys.exit(2)
+        try:
+            note = resolve_note(args[1])
+            print(export_note(note, Buffer(note).lines, args[2]))
+        except (ExportError, ValueError, OSError) as e:
+            print(f"lawnotes: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
     if args and args[0] in ("-h", "--help"):
         print(__doc__)
         return
     if args and args[0] in ("-V", "--version"):
         print(f"Law Notes {VERSION}")
         return
-    path = resolve_note(args[0]) if args and args[0].strip() else None
+    try:
+        path = resolve_note(args[0]) if args and args[0].strip() else None
+    except ValueError as e:
+        print(f"lawnotes: {e}", file=sys.stderr)
+        sys.exit(2)
     os.makedirs(NOTES_DIR, exist_ok=True)
     locale.setlocale(locale.LC_ALL, "")
     os.environ.setdefault("ESCDELAY", "25")

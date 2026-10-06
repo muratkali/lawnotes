@@ -3,6 +3,7 @@
 Run: python3 -m unittest discover -s tests -v
 Everything happens in a temporary HOME; the real install, app and notes are never touched.
 """
+import json
 import os
 import shutil
 import subprocess
@@ -109,6 +110,36 @@ class ReleaseTests(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("not signed", r.stderr)
         self.assertEqual(self.current(), "v9.0.1")
+
+    def test_3b_wrong_key_and_moved_tag_refused(self):
+        other = os.path.join(self.tmp, "attacker_key")
+        run("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "attacker", "-f", other)
+        def evil(w):
+            open(os.path.join(w, "README.md"), "a").write("evil\n")
+        evil(self.work)
+        self.git("commit", "-q", "-am", "evil")
+        self.git("-c", "gpg.format=ssh", "-c", f"user.signingkey={other}", "tag", "-s", "v9.0.2a", "-m", "x")
+        # a well-formed version tag signed with a key this Mac doesn't trust
+        self.git("-c", "gpg.format=ssh", "-c", f"user.signingkey={other}", "tag", "-s", "v9.9.9", "-m", "x")
+        self.git("push", "-q", "origin", "main", "v9.9.9")
+        r = self.lawnotes_cmd("--update", check=False)
+        self.assertIn("not signed with the Law Notes release key", r.stderr)
+        self.assertEqual(self.current(), "v9.0.1")
+        # moving an already-installed tag to other code is ignored
+        repo = os.path.join(self.share, "repo.git")
+        before = run("git", f"--git-dir={repo}", "rev-parse", "v9.0.1^{commit}").stdout.strip()
+        self.git("-c", "gpg.format=ssh", "-c", f"user.signingkey={self.key}", "tag", "-f", "-s", "v9.0.1", "-m", "moved")
+        self.git("push", "-q", "-f", "origin", "v9.0.1")
+        self.lawnotes_cmd("--update", check=False)
+        self.assertEqual(run("git", f"--git-dir={repo}", "rev-parse", "v9.0.1^{commit}").stdout.strip(), before)
+        # clean up so later tests see a sane origin
+        self.git("push", "-q", "origin", ":refs/tags/v9.9.9")
+        run("git", f"--git-dir={repo}", "tag", "-d", "v9.9.9")
+        self.git("tag", "-d", "v9.9.9", "v9.0.2a")
+        state = os.path.join(self.share, "state.json")
+        st = json.load(open(state))
+        st["failed"] = [t for t in st.get("failed", []) if t != "v9.9.9"]
+        json.dump(st, open(state, "w"))
 
     def test_4_broken_release_refused(self):
         def break_it(w):

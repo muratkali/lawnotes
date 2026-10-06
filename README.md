@@ -8,6 +8,8 @@ A small terminal editor for law notes on macOS. Notes are plain Markdown files, 
 - British English spell check using the Mac's own dictionary, which knows legal Latin.
 - Saves as you type, never overwrites a note changed on another Mac, and keeps version history (^R).
 
+- Export to Word or PDF (Option+E): case names in italics (OSCOLA), footnotes as real footnotes.
+
 Press **^G** in the editor to see every shortcut.
 
 ## Install
@@ -20,6 +22,8 @@ curl -fsSL https://raw.githubusercontent.com/muratkali/lawnotes/main/install.sh 
 
 You need Apple's Command Line Tools. If they're missing, the installer opens Apple's install window; run it again afterwards. On a new Mac, let iCloud Drive finish syncing first, so your existing notes are already there.
 
+About trust: the installer script itself comes straight from `main`, like any `curl | bash` install, so only run the command above. Everything it installs is checked: it downloads the newest release tag, verifies its signature against the Law Notes release key written into the script, and runs the release's self-test before using it. From then on, this Mac trusts only that key.
+
 The installer installs the newest **signed release** and sets up:
 
 - **Law Notes.app** in `~/Applications`. Open it from Spotlight or the Dock: it opens one dedicated, dark red Law Notes window, or brings the open one forward.
@@ -27,6 +31,16 @@ The installer installs the newest **signed release** and sets up:
 - the notes folder `~/UCL/notes`, linked to **iCloud Drive → UCL Notes** when iCloud Drive is on, so every Mac signed in to the same Apple ID shares the same notes
 
 Only one copy of Law Notes runs at a time. Opening it again switches to the open copy (and opens the note you asked for there).
+
+## Export
+
+Option+E (or F5) in the editor, or from a terminal:
+
+```sh
+lawnotes --export Tort/Negligence docx    # or pdf; saved to ~/Downloads
+```
+
+Word export needs pandoc: `brew install pandoc`. PDF export uses macOS itself.
 
 ## Updates, rollback, uninstall
 
@@ -69,7 +83,7 @@ CI runs the tests on macOS with the system Python (what a fresh Mac has) and a c
 
 1. Make sure CI passed on `main`.
 2. Set `VERSION` in `lawnotes.py` and add a `## X.Y.Z` section to `CHANGELOG.md`, then commit and push.
-3. When CI is green again, run `./release.sh X.Y.Z`. It checks all of the above, signs the tag with the release key (`~/.ssh/lawnotes_release_ed25519`), pushes it and creates the GitHub release.
+3. When CI is green again, unlock the release key for 15 minutes with `ssh-add -t 900 ~/.ssh/lawnotes_release_ed25519` (it asks for its passphrase), then run `./release.sh X.Y.Z`. It checks all of the above, signs the tag, pushes it and creates the GitHub release.
 4. Run `lawnotes --update` on one Mac and open a note before the others update themselves.
 
 Versions follow semver: patch for fixes, minor for features, major for changes to the notes layout or history store.

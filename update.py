@@ -100,7 +100,17 @@ def tell_editor(msg):
 
 
 def fetch():
-    git("fetch", "-q", "origin", "refs/tags/*:refs/tags/*")
+    """Download release tags. A tag this Mac already has is never changed: if one was moved on
+    GitHub (force-pushed to other code), it's ignored instead of making every update fail."""
+    git("fetch", "-q", "--prune", "--no-tags", "origin", "+refs/tags/*:refs/upstream-tags/*")
+    upstream = git("for-each-ref", "--format=%(refname:strip=2) %(objectname)", "refs/upstream-tags").stdout
+    for line in upstream.splitlines():
+        tag, obj = line.split()
+        local = git("rev-parse", "-q", "--verify", f"refs/tags/{tag}", check=False).stdout.strip()
+        if not local:
+            git("update-ref", f"refs/tags/{tag}", obj)
+        elif local != obj:
+            print(f"Law Notes: ignoring {tag}: it was moved on GitHub after this Mac saw it", file=sys.stderr)
 
 
 def releases():
@@ -382,6 +392,8 @@ def install(tag):
     else:
         print(f"    Not built: {APP} already exists and isn't Law Notes.")
     print("    Or type `lawnotes` in a terminal" + (" (inside herdr: a Notes tab)." if herdr else "."))
+    if not shutil.which("pandoc", path="/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "")):
+        print("    For Word export (Option+E), install pandoc: brew install pandoc")
     print("    Updates: automatic, once a day, signed releases only. `lawnotes --update` checks now,\n"
           "    `lawnotes --rollback` goes back, LAWNOTES_NO_UPDATE=1 turns it off, `lawnotes --uninstall` removes it.")
 

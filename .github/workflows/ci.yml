@@ -6,6 +6,9 @@ on:
     tags: ["v*"]
   pull_request:
 
+permissions:
+  contents: read  # CI only reads the code
+
 jobs:
   test:
     name: tests (${{ matrix.python }})
@@ -15,11 +18,13 @@ jobs:
       matrix:
         python: [system, "3.12"]  # system = /usr/bin/python3, what a fresh Mac has
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         if: matrix.python != 'system'
         with:
           python-version: ${{ matrix.python }}
+      - name: Install pandoc (for the export tests)
+        run: command -v pandoc || brew install pandoc
       - name: Run tests
         run: |
           if [ "${{ matrix.python }}" = system ]; then PY=/usr/bin/python3; else PY=python3; fi
@@ -31,7 +36,7 @@ jobs:
   shell:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
       - run: bash -n install.sh release.sh
       - run: command -v shellcheck || brew install shellcheck
       - run: shellcheck install.sh release.sh
@@ -40,7 +45,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
       - name: VERSION in lawnotes.py matches the tag
         run: |
           v=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' lawnotes.py)

@@ -3,8 +3,14 @@
 #
 # Checks that main is pushed, VERSION and CHANGELOG match, and CI passed for this exact
 # commit; then signs the tag with the release key, pushes it and creates the GitHub
-# release. Every Mac picks it up within a day (after verifying the signature and
-# running the self-test), or straight away with `lawnotes --update`.
+# release.
+#
+# The release key has a passphrase and is only usable while you've unlocked it in the
+# ssh-agent, so nothing else on this Mac can sign a release. Before releasing:
+#   ssh-add -t 900 ~/.ssh/lawnotes_release_ed25519     # asks for the passphrase; 15 minutes
+#
+# Every Mac picks a release up within a day (after verifying the signature and running
+# the self-test), or straight away with `lawnotes --update`.
 set -euo pipefail
 
 key="${LAWNOTES_RELEASE_KEY:-$HOME/.ssh/lawnotes_release_ed25519}"
@@ -17,7 +23,9 @@ version="$1"; tag="v$version"
 cd "$(dirname "$0")"
 
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "version must look like 1.2.0"
-[ -f "$key" ] || fail "release key not found at $key"
+[ -f "$key.pub" ] || fail "release key not found at $key"
+ssh-add -L 2>/dev/null | grep -qF "$(cut -d' ' -f1-2 "$key.pub")" \
+  || fail "unlock the release key first: ssh-add -t 900 $key (it asks for the passphrase)"
 [ -z "$(git status --porcelain)" ] || fail "commit or stash your changes first"
 [ "$(git branch --show-current)" = main ] || fail "release from main"
 git fetch -q origin
@@ -37,7 +45,7 @@ print("none" if not runs else "pending" if any(r["status"] != "completed" for r 
 signers=$(mktemp)
 trap 'rm -f "$signers"' EXIT
 printf 'lawnotes-release namespaces="git" %s\n' "$(cut -d' ' -f1-2 "$key.pub")" > "$signers"
-git -c gpg.format=ssh -c user.signingkey="$key" tag -s "$tag" -m "Law Notes $version"
+git -c gpg.format=ssh -c user.signingkey="$key.pub" tag -s "$tag" -m "Law Notes $version"  # signs via the agent
 git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$signers" verify-tag "$tag"
 push origin "$tag"
 

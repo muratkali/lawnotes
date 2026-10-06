@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0
+
+- Export to Word (.docx) or PDF with Option+E (or F5), or `lawnotes --export NOTE docx|pdf`, into Downloads. Case names are put in italics (OSCOLA), `[^1]` footnotes become real Word footnotes, each line of a note stays a line, and Times New Roman 12 with 1.5 spacing is used. Word export needs pandoc (`brew install pandoc`); PDF is made by macOS itself, no LaTeX needed.
+- Security: note names can't leave the notes folder or contain control characters; "open this note" requests from other programs only open notes; a release tag moved on GitHub is ignored instead of stopping all updates; releases are signed through the ssh-agent so the release key can have a passphrase; GitHub Actions are pinned to exact commits with read-only permissions.
+- New tests: wrong-key and moved-tag releases, hostile note content (terminal control codes), path traversal, hostile requests, 400 rounds of random input, and export.
+
 ## 1.1.6
 
 - With text selected, `*` wraps it in `*…*` (italic) and keeps it selected, so a second `*` makes it `**…**` (bold). `_` works the same way.

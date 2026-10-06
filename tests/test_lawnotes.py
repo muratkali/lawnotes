@@ -157,6 +157,52 @@ class TextTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
+@unittest.skipUnless(lawnotes.find_tool("pandoc"), "export needs pandoc (brew install pandoc)")
+class ExportTests(unittest.TestCase):
+    NOTE = [
+        "# Negligence",
+        "",
+        "Duty: Donoghue v Stevenson [1932] AC 562 applies.[^1]",
+        "",
+        "-- the claimant's burden",
+        "",
+        "    - the burden of proof, on balance",
+        "    - ",
+        "    indented text that is not code",
+        "",
+        "[^1]: Lord Atkin's neighbour principle.",
+    ]
+
+    def setUp(self):
+        self.out = tempfile.mkdtemp(dir=TMP)
+        lawnotes.EXPORT_DIR = self.out
+
+    def test_word(self):
+        import zipfile
+        path = lawnotes.export_note(os.path.join(TMP, "Negligence.md"), self.NOTE, "docx")
+        z = zipfile.ZipFile(path)
+        doc, notes = z.read("word/document.xml").decode(), z.read("word/footnotes.xml").decode()
+        self.assertIn("neighbour principle", notes)                      # a real footnote
+        self.assertRegex(doc, r"<w:i ?/>.*?Donoghue v Stevenson")          # case name in italics (OSCOLA)
+        self.assertIn("the burden of proof", doc)                         # nothing eaten by a "table"
+        self.assertNotIn("<w:tbl>", doc)
+        self.assertNotIn("SourceCode", doc)                               # indentation isn't code
+        self.assertIn("Times New Roman", z.read("word/styles.xml").decode())
+
+    def test_pdf(self):
+        path = lawnotes.export_note(os.path.join(TMP, "Negligence.md"), self.NOTE, "pdf")
+        data = open(path, "rb").read()
+        self.assertTrue(data.startswith(b"%PDF"))
+        self.assertGreater(len(data), 2000)
+
+    def test_markdown_preparation(self):
+        md = lawnotes.export_markdown(self.NOTE).split("\n")
+        self.assertIn("Duty: *Donoghue v Stevenson* [1932] AC 562 applies.[^1]", md)
+        self.assertIn("- the burden of proof, on balance", md)          # outside a list: not code
+        self.assertNotIn("    - ", md)                                     # empty bullet dropped
+        self.assertEqual(lawnotes.export_markdown(["*Re Polemis* applies"]).strip(), "*Re Polemis* applies")
+
+
 class Session:
     """The editor running in a pseudo-terminal, driven by keystrokes."""
 

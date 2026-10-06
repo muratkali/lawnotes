@@ -47,7 +47,13 @@ main() {
     say "Downloading Law Notes"
     git clone -q --bare "$repo" "$root/repo.git"
   fi
-  git --git-dir="$root/repo.git" fetch -q origin 'refs/tags/*:refs/tags/*'
+  # New tags only: a tag this Mac already has is never changed, even if it was moved upstream
+  git --git-dir="$root/repo.git" fetch -q --prune --no-tags origin '+refs/tags/*:refs/upstream-tags/*'
+  local t obj
+  while read -r t obj; do
+    git --git-dir="$root/repo.git" rev-parse -q --verify "refs/tags/$t" >/dev/null \
+      || git --git-dir="$root/repo.git" update-ref "refs/tags/$t" "$obj"
+  done < <(git --git-dir="$root/repo.git" for-each-ref --format='%(refname:strip=2) %(objectname)' refs/upstream-tags)
 
   local tag="${LAWNOTES_VERSION:-$(git --git-dir="$root/repo.git" tag -l 'v*' --sort=-v:refname | head -1)}"
   [ -n "$tag" ] || fail "No Law Notes releases found."
