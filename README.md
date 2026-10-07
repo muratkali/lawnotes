@@ -9,6 +9,7 @@
 - Saves as you type, never overwrites a note changed on another Mac, and keeps version history (^R).
 
 - Export to Word or PDF (Option+E): case names in italics (OSCOLA), footnotes as real footnotes.
+- Paste tables from Word: they become Markdown tables, and export back to Word as real tables.
 - Panes like herdr: Option+D splits side by side, Option+Shift+D stacks, Option+O switches, Option+W closes.
 
 Press **^G** in the editor to see every shortcut.

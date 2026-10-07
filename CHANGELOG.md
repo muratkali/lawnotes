@@ -3,6 +3,7 @@
 ## 1.4.0
 
 - Labelled **beta**: README, `lawnotes --version`, the ^G help screen and the installer's closing message.
+- Paste tables from Word (⌘V or ^V): they become Markdown tables with lined-up columns, and export back to Word as real tables. A cell with several paragraphs stays one cell.
 - The note list says how to make folders: type Folder/Name (e.g. Contract/Offer) and press Enter.
 - Notes reopen where you left off.
 - Enter on an empty indented bullet moves it out a level instead of deleting the line.

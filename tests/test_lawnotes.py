@@ -169,6 +169,19 @@ class TextTests(unittest.TestCase):
         app.highlight = lambda line: [curses.A_ITALIC | (1 << 8)] * len(line)
         self.assertEqual(app.misspelt("teh case"), [(0, 3)])
 
+    def test_word_table_becomes_markdown(self):
+        word = ("Case\tCourt\tHeld\r"
+                "Donoghue v Stevenson\tHL\tDuty of care owed\r"
+                "Caparo v Dickman\tHL\tThree-stage test\rFair, just | reasonable\r")
+        self.assertEqual(lawnotes.table_from_text(word), "\n".join([
+            "| Case                 | Court | Held                                         |",
+            "|----------------------|-------|----------------------------------------------|",
+            "| Donoghue v Stevenson | HL    | Duty of care owed                            |",
+            "| Caparo v Dickman     | HL    | Three-stage test<br>Fair, just \\| reasonable |",
+        ]))
+        self.assertIsNone(lawnotes.table_from_text("one line\twith a tab"))     # not a table
+        self.assertIsNone(lawnotes.table_from_text("Para one\nPara\ttwo\nThree\nFour"))
+
     def test_party_labels(self):
         found = lambda t: [m.group() for m in lawnotes.PARTY_RE.finditer(t)]
         self.assertEqual(found("D punched V. C sued D1 and D2."), ["D", "V", "C", "D1", "D2"])
@@ -242,6 +255,14 @@ class ExportTests(unittest.TestCase):
         data = open(path, "rb").read()
         self.assertTrue(data.startswith(b"%PDF"))
         self.assertGreater(len(data), 2000)
+
+    def test_pasted_table_exports_as_a_word_table(self):
+        import zipfile
+        table = lawnotes.table_from_text("Case\tHeld\nDonoghue v Stevenson\tDuty owed\n")
+        path = lawnotes.export_note(os.path.join(TMP, "Table.md"), ["# Cases", ""] + table.split("\n"), "docx")
+        doc = zipfile.ZipFile(path).read("word/document.xml").decode()
+        self.assertIn("<w:tbl>", doc)
+        self.assertIn("Duty owed", doc)
 
     def test_markdown_preparation(self):
         md = lawnotes.export_markdown(self.NOTE).split("\n")
@@ -376,6 +397,18 @@ class SessionTests(unittest.TestCase):
         mine = [l for l in open(lawnotes.LOG_FILE).read().splitlines() if f"[{s.pid}]" in l]
         self.assertIn("exited: window or pane closed (SIGHUP)", "\n".join(mine))
         self.assertFalse(any("CRASH" in l for l in mine), mine)
+
+    def test_paste_a_word_table(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Pasted.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("# Cases\n")
+        s = Session(note)
+        s.keys(b"\x05\x1b[200~Case\tHeld\rDonoghue v Stevenson\tDuty owed\r\x1b[201~\x13", 0.8)  # \u2318V
+        self.assertTrue(s.quit())
+        self.assertEqual(open(note).read(), "# Cases\n\n"
+                         "| Case                 | Held      |\n"
+                         "|----------------------|-----------|\n"
+                         "| Donoghue v Stevenson | Duty owed |\n\n")
 
     def test_note_list_explains_folders(self):
         os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)

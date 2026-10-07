@@ -815,6 +815,37 @@ def export_note(path, lines, fmt):
     raise ExportError(f"unknown format {fmt}")
 
 
+def table_from_text(text):
+    """A table copied from Word (or Excel, Pages) arrives as plain text: cells separated by tabs,
+    rows by line breaks. Returns it as a Markdown pipe table with lined-up columns, or None if
+    the text isn't a table. A tab-free line after a complete row is taken as another paragraph
+    of that row's last cell (Word's plain text can't tell this from a new row's first cell)."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").strip("\n").split("\n")
+    if len(lines) < 2 or 2 * sum("\t" in line for line in lines) < len(lines):
+        return None
+    cols = max(line.count("\t") for line in lines) + 1
+    rows, cur = [], None
+    for line in lines:
+        if cur is None and rows and "\t" not in line:
+            rows[-1] += "<br>" + line      # more paragraphs of the previous row's last cell
+            continue
+        cur = line if cur is None else cur + "<br>" + line
+        if cur.count("\t") >= cols - 1:
+            rows.append(cur)
+            cur = None
+    if cur is not None:
+        rows.append(cur)
+    if len(rows) < 2:
+        return None
+    cells = [[clean_text(c).strip().replace("|", "\\|") for c in row.split("\t")] for row in rows]
+    for row in cells:
+        row += [""] * (cols - len(row))
+    widths = [max(3, max(len(row[i]) for row in cells)) for i in range(cols)]
+    line = lambda row: "| " + " | ".join(c.ljust(w) for c, w in zip(row, widths)) + " |"
+    rule = "|" + "|".join("-" * (w + 2) for w in widths) + "|"
+    return "\n".join([line(cells[0]), rule] + [line(row) for row in cells[1:]])
+
+
 def clean_text(text):
     """Pasted text: keep special spaces (as spaces) and line separators, drop control codes."""
     text = unicodedata.normalize("NFC", text.replace("\r\n", "\n").replace("\r", "\n").expandtabs(4))
@@ -1096,6 +1127,7 @@ HELP = [
     ("Shift+arrows", "Select text (Shift+Option+arrows selects by word). Click with the mouse to place the cursor, drag to select."),
     ("Double-click", "Selects a word, or a whole case name, citation or statute. Triple-click selects the line."),
     ("Scroll", "The mouse wheel moves the view only; the cursor stays where it was, and typing carries on there."),
+    ("Tables", "Copy a table in Word and paste it (⌘V or ^V): it becomes a Markdown table with lined-up columns, and exports back to Word as a real table."),
     ("^C  ^X  ^V", "Copy / cut / paste using the Mac clipboard: what you copy flashes green. With nothing selected, ^C and ^X take the whole line. ⌘V pastes too, but ⌘C can't copy text selected inside Law Notes (Terminal takes ⌘C): use ^C."),
     ("Typing", "With text selected, typing or Backspace replaces it."),
     ("*  _", "With text selected, * wraps it in *italics*; press again for **bold**. _ works the same way."),
@@ -1780,7 +1812,7 @@ class App:
             if chars[-6:] == end:
                 del chars[-6:]
                 break
-        return clean_text("".join(chars))
+        return "".join(chars)  # raw: tabs matter for tables; callers clean it
 
     def prompt(self, label, text=""):
         while True:
@@ -1801,7 +1833,7 @@ class App:
                 if r is None:
                     return None
                 if r[0] == "paste":
-                    text += r[1].split("\n")[0]
+                    text += clean_text(r[1]).split("\n")[0]
             elif k in ("\x03", "\x07", "\x11"):
                 return None
             elif k in BACKSPACE:
@@ -1845,7 +1877,7 @@ class App:
                 if r is None:
                     return None
                 if r[0] == "paste":
-                    query, sel = query + r[1].split("\n")[0], 0
+                    query, sel = query + clean_text(r[1]).split("\n")[0], 0
                 if r[0] == "key" and isinstance(r[1], int):
                     k = r[1]  # arrows the terminal sent as ESC [ A etc.
             if k in ("\x03", "\x11"):
@@ -2281,11 +2313,21 @@ class App:
 
     def paste_clipboard(self):
         text = clipboard_get()
-        if text is None:
-            text = getattr(self, "clip_text", "")
-        text = clean_text(text)
+        self.paste_text(text if text is not None else getattr(self, "clip_text", ""))
+
+    def paste_text(self, raw):
+        """Paste (⌘V or ^V): a table from Word becomes a Markdown table on its own lines."""
+        b = self.buf
+        table = table_from_text(raw)
+        if table:
+            before = b.lines[b.cy][:b.cx]
+            b.insert(("\n\n" if before.strip() else "") + table + "\n", kind="paste")
+            rows = table.count("\n") - 1
+            self.say(f"Pasted a table: {rows} row{'s' * (rows != 1)} (exports to Word as a real table)", 6)
+            return
+        text = clean_text(raw)
         if text:
-            self.buf.insert(text, kind="paste")
+            b.insert(text, kind="paste")
 
     def screen_to_buf(self, y, x):
         if not self.row_map or not 0 <= y < self.rows:
@@ -2434,9 +2476,8 @@ class App:
         elif isinstance(key, tuple) and key[0] == "mouse":
             self.log_once("mouse events are arriving")
             keep_selection = self.mouse(*key[1])
-        elif isinstance(key, tuple):  # bracketed paste
-            if key[1]:
-                b.insert(key[1], kind="paste")
+        elif isinstance(key, tuple):  # bracketed paste (⌘V)
+            self.paste_text(key[1])
         elif key == "esc":
             self.search = ""
         elif key == "shift-enter":
