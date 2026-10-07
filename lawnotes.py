@@ -54,7 +54,7 @@ import traceback
 import unicodedata
 from functools import lru_cache
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 HELP_TITLE = "Help — Law Notes (beta)"
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
 NOTES_DIR = os.path.abspath(os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes")))
@@ -189,6 +189,8 @@ HEADING_RE = re.compile(r"^(#{1,6})\s")
 # A comment to yourself: // and everything after it (not the // in https://). Highlighted, and
 # left out of exports.
 COMMENT_RE = re.compile(r"(?:^|(?<=\s))//.*$")
+# Highlighted text: ==like this== (exported as a yellow highlight in Word)
+MARK_RE = re.compile(r"==(?=\S).+?(?<=\S)==")
 # Abbreviations expand when a word is finished (space, punctuation, Enter); add your own in
 # ABBREV_FILE, one "SHORT = Long form" per line (lawnotes --abbreviations opens it).
 DEFAULT_ABBREVIATIONS = {"CL": "Common Law", "EL": "Equity Law", "LCh": "Lord Chancellor"}
@@ -704,7 +706,8 @@ EXPORT_CSS = """html { color-scheme: light; }
 body { font-family: "Times New Roman", Times, serif; font-size: 12pt; line-height: 1.5;
        color: #000; background: #fff; }
 h1 { font-size: 16pt; } h2 { font-size: 14pt; } h3 { font-size: 12pt; }
-.footnotes, section.footnotes { font-size: 10pt; }"""
+.footnotes, section.footnotes { font-size: 10pt; }
+mark { background: #fff200; color: #000; }"""
 
 
 class ExportError(Exception):
@@ -801,7 +804,7 @@ def export_note(path, lines, fmt):
     out = os.path.join(EXPORT_DIR, f"{name}.{fmt}")
     text = export_markdown(lines)
     # each line of a note stays a line; no "simple tables", which plain notes trigger by accident
-    source = "markdown+hard_line_breaks-simple_tables-multiline_tables"
+    source = "markdown+hard_line_breaks+mark-simple_tables-multiline_tables"  # ==text== highlights
     if fmt == "docx":
         r = subprocess.run([pandoc, "-f", source, "-t", "docx", "--reference-doc", reference_docx(pandoc),
                             "-o", out], input=text, capture_output=True, text=True, timeout=120)
@@ -1169,6 +1172,7 @@ HELP = [
     ("Tables", "Copy a table in Word and paste it (⌘V or ^V): it becomes a Markdown table with lined-up columns, and exports back to Word as a real table."),
     ("^C  ^X  ^V", "Copy / cut / paste using the Mac clipboard: what you copy flashes green. With nothing selected, ^C and ^X take the whole line. ⌘V pastes too, but ⌘C can't copy text selected inside Law Notes (Terminal takes ⌘C): use ^C."),
     ("Typing", "With text selected, typing or Backspace replaces it."),
+    ("=  Option+H", "Highlight: with text selected, = highlights it (shown as ==text==, exported to Word as a yellow highlight); press again to remove. Option+H highlights the word under the cursor."),
     ("*  _", "With text selected, * wraps it in *italics*; press again for **bold**. _ works the same way."),
     ("#", "Editing"),
     ("^K", "Cut the line (press repeatedly to cut several lines)."),
@@ -1277,6 +1281,7 @@ class App:
             "copied":  ((16, 120), (C.COLOR_BLACK, C.COLOR_GREEN)),
             "bar_off": ((181, 88), (C.COLOR_WHITE, C.COLOR_BLACK)),
             "comment": ((16, 229), (C.COLOR_BLACK, C.COLOR_YELLOW)),
+            "mark":    ((16, 226), (C.COLOR_BLACK, C.COLOR_YELLOW)),
         }
         pairs = {}
         for n, (role, (c256, c8)) in enumerate(palette.items(), start=1):
@@ -1310,6 +1315,7 @@ class App:
             "copied": pairs["copied"] | curses.A_BOLD,
             "bar_off": pairs["bar_off"],
             "comment": pairs["comment"],
+            "mark": pairs["mark"] | curses.A_BOLD,
         }
         self.italic = italic
 
@@ -1578,6 +1584,8 @@ class App:
             bm = BULLET_RE.match(line)
             if bm and not quote:
                 attrs[bm.start(2):bm.end(2)] = [A["bullet"]] * len(bm.group(2))
+        for mm in MARK_RE.finditer(line):     # ==highlighted text==
+            attrs[mm.start():mm.end()] = [A["mark"]] * (mm.end() - mm.start())
         for cm in COMMENT_RE.finditer(line):  # // comments, like a highlighter pen
             attrs[cm.start():] = [A["comment"]] * (len(line) - cm.start())
         if len(self._hl) > 5000:
@@ -1824,7 +1832,7 @@ class App:
             first = self.get_key()
             if first in ("\r", "\n"):
                 return ("key", "shift-enter")  # Option+Enter on terminals using Option as Meta
-            if first in ("b", "f", "e", "d", "D", "w", "o", "\x7f", "\x08"):
+            if first in ("b", "f", "e", "d", "D", "w", "o", "h", "\x7f", "\x08"):
                 return ("alt", first)
             if isinstance(first, int):  # Esc + an arrow curses already decoded: Option+arrow
                 return ("key", OPTION_ARROWS.get(first))
@@ -2338,6 +2346,33 @@ class App:
         except (ExportError, OSError, subprocess.SubprocessError) as e:
             self.say(f"Export failed: {e}", 12)
 
+    def toggle_highlight(self):
+        """==highlight== the selection, or the word under the cursor; again to remove it."""
+        b = self.buf
+        if not self.selection():
+            line = b.lines[b.cy]
+            span = self.word_at(b.cy, b.cx) or (self.word_at(b.cy, b.cx - 1) if b.cx else None)
+            if not span:
+                self.say("Select some text (or put the cursor on a word) to highlight it", 4)
+                return
+            self.anchor, b.cx = (b.cy, span[0]), span[1]
+        (y1, x1), (y2, x2) = self.selection()
+        first, last = b.lines[y1], b.lines[y2]
+        b.checkpoint("highlight")
+        if first[max(0, x1 - 2):x1] == "==" and last[x2:x2 + 2] == "==":  # already highlighted: remove
+            b.lines[y2] = last[:x2] + last[x2 + 2:]
+            line = b.lines[y1]
+            b.lines[y1] = line[:x1 - 2] + line[x1:]
+            self.anchor = (y1, x1 - 2)
+            b.cy, b.cx = y2, x2 - (2 if y1 == y2 else 0)
+        else:
+            b.lines[y2] = last[:x2] + "==" + last[x2:]
+            line = b.lines[y1]
+            b.lines[y1] = line[:x1] + "==" + line[x1:]
+            self.anchor = (y1, x1 + 2)
+            b.cy, b.cx = y2, x2 + (2 if y1 == y2 else 0)
+        self.want_x = None
+
     def wrap_selection(self, mark):
         (y1, x1), (y2, x2) = self.selection()
         b = self.buf
@@ -2497,7 +2532,7 @@ class App:
                 return r
             if r[0] == "alt":
                 return {"b": "word-left", "f": "word-right", "e": "export", "d": "split-right",
-                        "D": "split-down", "w": "close-pane", "o": "next-pane",
+                        "D": "split-down", "w": "close-pane", "o": "next-pane", "h": "highlight",
                         "\x7f": "delete-word-left", "\x08": "delete-word-left"}[r[1]]
             return r[1]  # a curses key, a name, or None for keys we don't use
         if isinstance(key, int) and key != curses.KEY_RESIZE:
@@ -2521,6 +2556,11 @@ class App:
         vertical = key in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE)
         was_cutting, self.cutting = self.cutting, False
 
+        # = with text selected highlights it (or removes the highlight); Option+H does the same,
+        # and with nothing selected highlights the word under the cursor
+        if (key == "=" and self.selection()) or key == "highlight":
+            self.toggle_highlight()
+            return
         # * or _ with text selected wraps it (Markdown italic; again for bold) and keeps it selected
         if key in ("*", "_") and self.selection():
             self.wrap_selection(key)

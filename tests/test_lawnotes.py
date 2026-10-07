@@ -203,6 +203,11 @@ class TextTests(unittest.TestCase):
         self.assertEqual(lawnotes.load_abbreviations(f)["RA"], "reasonable adult")
         self.assertEqual(lawnotes.load_abbreviations(f)["CL"], "common law")    # yours win
 
+    def test_highlight_markup(self):
+        spans = lambda t: [m.group() for m in lawnotes.MARK_RE.finditer(t)]
+        self.assertEqual(spans("The ==ratio decidendi== binds; ==Caparo== too"), ["==ratio decidendi==", "==Caparo=="])
+        self.assertEqual(spans("a == b and c == d"), [])                 # not a highlight
+
     def test_party_labels(self):
         found = lambda t: [m.group() for m in lawnotes.PARTY_RE.finditer(t)]
         self.assertEqual(found("D punched V. C sued D1 and D2."), ["D", "V", "C", "D1", "D2"])
@@ -284,6 +289,14 @@ class ExportTests(unittest.TestCase):
         doc = zipfile.ZipFile(path).read("word/document.xml").decode()
         self.assertIn("<w:tbl>", doc)
         self.assertIn("Duty owed", doc)
+
+    def test_highlight_exports_as_word_highlight(self):
+        import zipfile
+        path = lawnotes.export_note(os.path.join(TMP, "Mark.md"), ["The ==ratio decidendi== binds."], "docx")
+        doc = zipfile.ZipFile(path).read("word/document.xml").decode()
+        self.assertRegex(doc, r'<w:highlight w:val="yellow" ?/>')
+        self.assertIn("ratio decidendi", doc)
+        self.assertNotIn("==", doc)
 
     def test_markdown_preparation(self):
         md = lawnotes.export_markdown(self.NOTE).split("\n")
@@ -453,6 +466,20 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(s.quit())
         lines = open(note).read().splitlines()
         self.assertEqual((lines[0], lines[-1]), ("Aline 0", "line 49Z"))
+
+    def test_highlight_selection_and_word(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Marks.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("the ratio decidendi binds\nOther line here\n")
+        click = lambda col, row: f"\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m".encode()
+        s = Session(note)
+        s.keys(click(7, 1) + click(7, 1) + b"=", 0.5)     # double-click "ratio", =  -> ==ratio==
+        s.keys(b"=", 0.4)                                  # = again on the same selection: removes it
+        s.keys(b"=", 0.4)                                  # and again: back on
+        s.keys(b"\x1bOB\x01\x1bh", 0.4)                   # line 2, no selection: Option+H highlights the word
+        s.keys(b"\x13", 0.4)
+        self.assertTrue(s.quit())
+        self.assertEqual(open(note).read(), "the ==ratio== decidendi binds\n==Other== line here\n")
 
     def test_note_list_explains_folders(self):
         os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)

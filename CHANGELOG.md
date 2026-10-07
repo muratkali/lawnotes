@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.1
+
+- Highlight text: select it and press `=` (or Option+H, which also works on the word under the cursor). It's stored as `==text==`, shown with a yellow highlighter background, and exported to Word as a real yellow highlight (and to PDF). Press again to remove it.
+
 ## 1.4.0
 
 - Labelled **beta**: README, `lawnotes --version`, the ^G help screen and the installer's closing message.
