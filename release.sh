@@ -5,8 +5,9 @@
 # commit; then signs the tag with the release key, pushes it and creates the GitHub
 # release.
 #
-# The release key has a passphrase and is only usable while you've unlocked it in the
-# ssh-agent, so nothing else on this Mac can sign a release. Before releasing:
+# Signing needs you: the release key lives in 1Password, whose SSH agent asks you to approve
+# each signature (Touch ID), so nothing else on this Mac can sign a release. Without 1Password,
+# unlock the key in the system ssh-agent first:
 #   ssh-add -t 900 ~/.ssh/lawnotes_release_ed25519     # asks for the passphrase; 15 minutes
 #
 # Every Mac picks a release up within a day (after verifying the signature and running
@@ -23,9 +24,7 @@ version="$1"; tag="v$version"
 cd "$(dirname "$0")"
 
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "version must look like 1.2.0"
-[ -f "$key.pub" ] || fail "release key not found at $key"
-ssh-add -L 2>/dev/null | grep -qF "$(cut -d' ' -f1-2 "$key.pub")" \
-  || fail "unlock the release key first: ssh-add -t 900 $key (it asks for the passphrase)"
+[ -f "$key.pub" ] || fail "release key's public half not found at $key.pub"
 [ -z "$(git status --porcelain)" ] || fail "commit or stash your changes first"
 [ "$(git branch --show-current)" = main ] || fail "release from main"
 git fetch -q origin
@@ -45,6 +44,18 @@ print("success" if any(r["conclusion"] == "success" for r in done)
       else "failure" if any(r["conclusion"] not in ("cancelled", "skipped") for r in done)
       else "pending" if runs else "none")')
 [ "$ci" = success ] || fail "CI is '$ci' for $sha; wait for it to pass (gh run watch)"
+
+# Which ssh-agent can sign: 1Password's (asks you to approve with Touch ID) or one you unlocked
+onepassword="$HOME/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"
+pub=$(cut -d' ' -f1-2 "$key.pub")
+agent=""
+for sock in "${LAWNOTES_SIGN_AGENT:-}" "$onepassword" "${SSH_AUTH_SOCK:-}"; do
+  [ -n "$sock" ] && [ -S "$sock" ] || continue
+  if SSH_AUTH_SOCK="$sock" ssh-add -L 2>/dev/null | grep -qF "$pub"; then agent="$sock"; break; fi
+done
+[ -n "$agent" ] || fail "the release key isn't available: add it to 1Password, or ssh-add -t 900 $key"
+export SSH_AUTH_SOCK="$agent"
+[ "$agent" = "$onepassword" ] && echo "Signing with 1Password: approve the request (Touch ID)."
 
 signers=$(mktemp)
 trap 'rm -f "$signers"' EXIT
