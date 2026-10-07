@@ -363,16 +363,17 @@ def setup_notes():
             os.symlink(icloud_notes, NOTES)
         else:
             os.makedirs(NOTES)
-    real = os.path.realpath(NOTES)
+    real, icloud = os.path.realpath(NOTES), os.path.realpath(ICLOUD)  # compare resolved paths
+    in_icloud = real.startswith(icloud + os.sep)
     n = count_notes(real)
-    where = "iCloud Drive/" + os.path.relpath(real, ICLOUD) if real.startswith(ICLOUD + os.sep) else NOTES
+    where = "iCloud Drive/" + os.path.relpath(real, icloud) if in_icloud else NOTES
     say(f"Notes: {n} in {where.replace(os.path.expanduser('~'), '~')}")
-    if real.startswith(ICLOUD + os.sep) and n == 0:
+    if in_icloud and n == 0:
         print("    UCL Notes is empty on this Mac. If you have notes on another Mac, wait until Finder\n"
               "    shows iCloud Drive has finished syncing before writing, or you'll get duplicate notes.")
-    elif not real.startswith(ICLOUD + os.sep) and os.path.isdir(ICLOUD):
+    elif not in_icloud and os.path.isdir(ICLOUD):
         print("    These notes are on this Mac only, not in iCloud Drive.")
-    if real.startswith(ICLOUD + os.sep):
+    if in_icloud:
         print("    Tip: in Finder, right-click iCloud Drive → UCL Notes → Keep Downloaded.")
 
 
@@ -386,7 +387,7 @@ def install(tag):
     setup_notes()
     herdr = shutil.which("herdr", path=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:/usr/local/bin:"
                          + os.environ.get("PATH", ""))
-    say(f"Installed Law Notes {tag}")
+    say(f"Installed Law Notes {tag} (beta)")
     if app_built:
         print("    Open it from Spotlight (⌘Space → Law Notes) or the Dock: a dedicated Law Notes window.")
     else:

@@ -69,6 +69,24 @@ class BufferTests(unittest.TestCase):
         b.undo()
         self.assertEqual(b.lines, ["the "])
 
+    def test_enter_on_empty_nested_bullet_outdents(self):
+        b = lawnotes.Buffer(self.path)
+        b.lines, b.cy, b.cx = ["- duty", "  - "], 1, 4
+        b.newline()
+        self.assertEqual((b.lines, b.cy, b.cx), (["- duty", "- "], 1, 2))  # outdented, not deleted
+        b.newline()
+        self.assertEqual(b.lines, ["- duty", ""])                       # top level: ends the list
+
+    def test_word_count_follows_edits(self):
+        b = lawnotes.Buffer(self.path)
+        b.insert("Donoghue v Stevenson")
+        self.assertEqual(b.word_count(), 3)
+        b.save()                              # a save starts a new undo step
+        b.insert(" neighbour test")
+        self.assertEqual(b.word_count(), 5)
+        b.undo()
+        self.assertEqual(b.word_count(), 3)
+
     def test_save_round_trip_and_undo(self):
         b = lawnotes.Buffer(self.path)
         b.insert("Donoghue v Stevenson")
@@ -163,6 +181,23 @@ class TextTests(unittest.TestCase):
 
     def test_resolve_note(self):
         self.assertEqual(lawnotes.resolve_note("Tort/Duty"), os.path.join(lawnotes.NOTES_DIR, "Tort", "Duty.md"))
+
+    def test_version_says_beta(self):
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "lawnotes.py"), "--version"],
+                           capture_output=True, text=True)
+        self.assertIn("beta", r.stdout)
+        self.assertIn("beta", lawnotes.HELP_TITLE)
+
+    def test_failed_history_snapshot_is_logged(self):
+        broken = os.path.join(TMP, "history-is-a-file")
+        open(broken, "w").write("not a git store")
+        saved = lawnotes.HISTORY_DIR
+        lawnotes.HISTORY_DIR = broken
+        try:
+            lawnotes.History().snapshot(wait=True)
+        finally:
+            lawnotes.HISTORY_DIR = saved
+        self.assertIn("history snapshot failed", open(lawnotes.LOG_FILE).read())
 
     def test_self_test_passes(self):
         r = subprocess.run([sys.executable, os.path.join(ROOT, "lawnotes.py"), "--self-test"],
@@ -341,6 +376,27 @@ class SessionTests(unittest.TestCase):
         mine = [l for l in open(lawnotes.LOG_FILE).read().splitlines() if f"[{s.pid}]" in l]
         self.assertIn("exited: window or pane closed (SIGHUP)", "\n".join(mine))
         self.assertFalse(any("CRASH" in l for l in mine), mine)
+
+    def test_note_list_explains_folders(self):
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(os.path.join(lawnotes.NOTES_DIR, "Existing.md"), "w").write("# Existing\n")
+        s = Session()                               # opens on the note list
+        self.assertIn(b"Folder/Name", s.out)          # shown even when notes exist
+        s.keys(b"Contract/Offer\r", 0.8)            # and it works: the folder is created
+        self.assertTrue(s.quit())
+        self.assertTrue(os.path.isfile(os.path.join(lawnotes.NOTES_DIR, "Contract", "Offer.md")))
+
+    def test_note_reopens_where_you_left_off(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Reopen.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("".join(f"line {i}\n" for i in range(60)))
+        s = Session(note)
+        s.keys(b"\x1bOB" * 25 + b"\x05", 0.6)   # line 26, end of line
+        self.assertTrue(s.quit())
+        s = Session(note)
+        s.keys(b"!\x13", 0.5)
+        self.assertTrue(s.quit())
+        self.assertEqual(open(note).read().splitlines()[25], "line 25!")
 
     def test_option_backspace_deletes_a_word(self):
         note = os.path.join(lawnotes.NOTES_DIR, "Words.md")

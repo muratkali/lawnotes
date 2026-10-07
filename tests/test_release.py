@@ -83,6 +83,8 @@ class ReleaseTests(unittest.TestCase):
     def test_1_install(self):
         r = run("bash", os.path.join(self.work, "install.sh"), env=self.env)
         self.assertIn("signature verified", r.stdout)
+        self.assertIn("(beta)", r.stdout)                                    # labelled beta
+        self.assertIn(".local/bin", open(os.path.join(self.home, ".zshrc")).read())  # every new shell
         self.assertEqual(self.current(), "v9.0.0")
         app = os.path.join(self.home, "Applications", "Law Notes.app", "Contents")
         self.assertIn(".local/bin", open(os.path.join(app, "MacOS", "law-notes")).read())  # PATH for herdr
@@ -97,6 +99,34 @@ class ReleaseTests(unittest.TestCase):
         self.assertTrue(os.path.islink(os.path.join(self.home, "UCL", "notes")) or
                         os.path.isdir(os.path.join(self.home, "UCL", "notes")))
         self.assertIn("Law Notes", self.lawnotes_cmd("--version").stdout)
+
+    def test_1b_installer_tells_the_truth(self):
+        """The messages the run review asked for: empty iCloud folder, notes on this Mac only,
+        and an app that couldn't be built. Each in a fresh home."""
+        def install(setup):
+            home = tempfile.mkdtemp(dir=self.tmp)
+            setup(home)
+            r = run("bash", os.path.join(self.work, "install.sh"), env={**self.env, "HOME": home})
+            return r.stdout
+        icloud = lambda h: os.path.join(h, "Library", "Mobile Documents", "com~apple~CloudDocs")
+        out = install(lambda h: os.makedirs(icloud(h)))
+        self.assertIn("UCL Notes is empty on this Mac", out)
+        def local_notes(h):
+            os.makedirs(icloud(h))
+            os.makedirs(os.path.join(h, "UCL", "notes"))
+            open(os.path.join(h, "UCL", "notes", "Tort.md"), "w").write("# Tort\n")
+        out = install(local_notes)
+        self.assertIn("Notes: 1 in", out)
+        self.assertIn("on this Mac only, not in iCloud Drive", out)
+        def foreign_app(h):
+            contents = os.path.join(h, "Applications", "Law Notes.app", "Contents")
+            os.makedirs(contents)
+            open(os.path.join(contents, "Info.plist"), "w").write(
+                '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key>'
+                '<string>com.example.other</string></dict></plist>')
+        out = install(foreign_app)
+        self.assertIn("isn't Law Notes", out)
+        self.assertNotIn("Open it from Spotlight", out)
 
     def test_2_signed_update(self):
         self.release("v9.0.1", change=lambda w: open(os.path.join(w, "README.md"), "a").write("\n9.0.1\n"))

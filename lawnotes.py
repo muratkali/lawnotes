@@ -54,7 +54,8 @@ import traceback
 import unicodedata
 from functools import lru_cache
 
-VERSION = "1.3.2"
+VERSION = "1.4.0"
+HELP_TITLE = "Help — Law Notes (beta)"
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
 NOTES_DIR = os.path.abspath(os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes")))
 NOTE_EXTS = (".md", ".txt")
@@ -76,6 +77,7 @@ BUNDLE_EVERY = 7 * 24 * 3600
 RUNNING_FILE = os.path.join(CACHE_DIR, "running.json")      # single instance: who has Law Notes open
 REQUEST_FILE = os.path.join(CACHE_DIR, "open-request.json")  # the launcher asks the open editor to open a note
 MESSAGE_FILE = os.path.join(CACHE_DIR, "update-message")     # written by update.py
+POSITIONS_FILE = os.path.join(CACHE_DIR, "positions.json")   # where each note was left
 LOG_FILE = os.path.join(CACHE_DIR, "lawnotes.log")           # starts, exits and why, crashes
 ICLOUD_LOGS = os.path.join(ICLOUD_DIR, "Law Notes Logs")     # the same log, one file per Mac
 ESCAPE_WAIT = 250  # ms to wait for the rest of an escape sequence: through herdr or a busy Mac,
@@ -227,6 +229,8 @@ class Buffer:
         self.undo_stack, self.redo_stack = [], []
         self._last_kind, self._last_time = None, 0.0
         self._after = None  # cursor position after the last edit: moving away starts a new undo step
+        self.version = 0    # bumped on every change, so derived values (word count) can be cached
+        self._words = (None, 0)
         if os.path.exists(path):
             self.load()
 
@@ -245,6 +249,7 @@ class Buffer:
         text = text.replace("\r\n", "\n").replace("\r", "\n").expandtabs(4)
         text = CONTROL_RE.sub("\ufffd", text)  # stray control bytes can't be drawn
         self.lines = text.split("\n")
+        self.version = getattr(self, "version", 0) + 1
         if len(self.lines) > 1 and self.lines[-1] == "":
             self.lines.pop()
 
@@ -298,17 +303,26 @@ class Buffer:
         if not self.dirty:
             self.dirty_since = now
         self.dirty, self.changed_at = True, now
+        self.version += 1
 
     def _swap(self, src, dst):
         if not src:
             return False
         dst.append((self.lines[:], self.cy, self.cx))
         self.lines, self.cy, self.cx = src.pop()
+        self.version += 1
         self._last_kind = None
         if not self.dirty:
             self.dirty_since = time.time()
         self.dirty, self.changed_at = True, time.time()
         return True
+
+    def word_count(self):
+        """Words in the note, recounted only after a change (it ran on every frame)."""
+        key = (self.version, len(self.lines))
+        if self._words[0] != key:
+            self._words = (key, sum(len(l.split()) for l in self.lines))
+        return self._words[1]
 
     def undo(self):
         return self._swap(self.undo_stack, self.redo_stack)
@@ -346,8 +360,13 @@ class Buffer:
             prefix = parent.group(1) + next_marker(parent.group(2)) + " " + ("[ ] " if parent.group(4) else "")
         elif m and self.cx >= m.end():
             if not line[m.end():].strip():
-                self.lines[self.cy] = ""
-                self.cx = 0
+                if m.group(1):  # an empty nested bullet moves out a level
+                    outdented = m.group(1)[:-2] + m.group(2) + " " + (m.group(4) or "")
+                    self.lines[self.cy] = outdented
+                    self.cx = len(outdented)
+                else:           # an empty top-level bullet ends the list
+                    self.lines[self.cy] = ""
+                    self.cx = 0
                 return
             prefix = m.group(1) + next_marker(m.group(2)) + " " + ("[ ] " if m.group(4) else "")
         else:
@@ -830,9 +849,9 @@ def clipboard_get():
 
 def notes_location():
     """Where the notes really are, in words: 'iCloud Drive/UCL Notes' or '~/UCL/notes'."""
-    real = os.path.realpath(NOTES_DIR)
-    if real.startswith(ICLOUD_DIR + os.sep):
-        return "iCloud Drive/" + os.path.relpath(real, ICLOUD_DIR)
+    real, icloud = os.path.realpath(NOTES_DIR), os.path.realpath(ICLOUD_DIR)
+    if real.startswith(icloud + os.sep):
+        return "iCloud Drive/" + os.path.relpath(real, icloud)
     return NOTES_DIR.replace(os.path.expanduser("~"), "~", 1)
 
 
@@ -881,8 +900,8 @@ class History:
                     if self.git("diff", "--cached", "--quiet").returncode == 1:
                         self.git("commit", "-q", "-m", f"Snapshot {datetime.datetime.now():%Y-%m-%d %H:%M}")
                     self.export_bundle()
-                except (OSError, subprocess.SubprocessError):
-                    pass
+                except (OSError, subprocess.SubprocessError) as e:
+                    log(f"history snapshot failed: {type(e).__name__}: {e}")
         if wait:
             work()
         else:
@@ -1045,6 +1064,7 @@ HINTS = [("^G", "Help"), ("^S", "Save"), ("^O", "Open"), ("^P", "Search all"), (
 
 # ^G help screen: (key, description); key "#" marks a section heading, "" a plain line.
 HELP = [
+    ("", "Law Notes is in beta: it's tested and your notes are plain Markdown files, but expect rough edges. If it ever closes unexpectedly, the reason is in iCloud Drive → Law Notes Logs."),
     ("#", "Panes"),
     ("Option+D", "Split side by side; Option+Shift+D splits one above the other. The new pane opens the note list (Esc keeps the same note)."),
     ("Option+O", "Next pane. Clicking a pane also switches to it."),
@@ -1236,11 +1256,44 @@ class App:
         found.sort(reverse=True)
         return found
 
+    def remember_position(self):
+        """Note where the cursor is in the open note, for next time (at most 300 notes)."""
+        b = self.buf
+        if not b:
+            return
+        try:
+            with open(POSITIONS_FILE) as f:
+                positions = json.load(f)
+        except (OSError, ValueError):
+            positions = {}
+        key = os.path.realpath(b.path)
+        positions.pop(key, None)
+        positions[key] = [b.cy, b.cx]
+        positions = dict(list(positions.items())[-300:])
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            with open(POSITIONS_FILE + ".tmp", "w") as f:
+                json.dump(positions, f)
+            os.replace(POSITIONS_FILE + ".tmp", POSITIONS_FILE)
+        except OSError:
+            pass
+
+    def recall_position(self):
+        try:
+            with open(POSITIONS_FILE) as f:
+                cy, cx = json.load(f)[os.path.realpath(self.buf.path)]
+            b = self.buf
+            b.cy = max(0, min(int(cy), len(b.lines) - 1))
+            b.cx = max(0, min(int(cx), len(b.lines[b.cy])))
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+
     def open(self, path):
         if not self.save_if_dirty():
             self.say("Can't switch notes until this one saves", 8)
             return False
         self.history.snapshot()
+        self.remember_position()
         shared = [b for p, b in self.buffers() if p is not self.pane
                   and os.path.realpath(b.path) == os.path.realpath(path)]
         self.buf = shared[0] if shared else Buffer(path)  # same note in two panes: one shared text
@@ -1256,8 +1309,11 @@ class App:
             self.buf.cy = 2
             if self.safe_save():
                 self.say("New note created · ^T inserts a template")
-        elif self.buf.note:
-            self.say(self.buf.note, 8)
+        else:
+            if not shared:
+                self.recall_position()  # back where you left off
+            if self.buf.note:
+                self.say(self.buf.note, 8)
         return True
 
     def safe_save(self, announce=False):
@@ -1371,7 +1427,9 @@ class App:
             return items
 
         choice = self.pick(f"Notes in {notes_location()}", build,
-                           "No notes yet. Type a name and press Enter — Folder/Name (e.g. Tort/Negligence) files it in a folder.")
+                           "No notes yet. Type a name and press Enter.",
+                           guide="New note or folder: type Folder/Name and press Enter, e.g. Contract/Offer "
+                                 "makes the Contract folder (Contract/Offer/Postal rule nests deeper).")
         if choice is None:
             return False
         action, arg = choice
@@ -1655,7 +1713,7 @@ class App:
         # Status bar
         path = b.path
         name = os.path.relpath(path, NOTES_DIR) if path.startswith(NOTES_DIR + os.sep) else path
-        words = sum(len(l.split()) for l in b.lines)
+        words = b.word_count()
         left = f" {name}  {'● unsaved' if b.dirty else '✓ saved'}"
         if active and time.time() < self.msg_until:
             left += f"   {self.msg}"
@@ -1751,25 +1809,28 @@ class App:
             elif isinstance(k, str) and k.isprintable():
                 text += k
 
-    def pick(self, title, build, empty_hint=""):
+    def pick(self, title, build, empty_hint="", guide=""):
         """Full-screen filterable list. build(query) -> [(label, value)]. Returns value or None."""
         query, sel, off = "", 0, 0
         while True:
             items = build(query)
             sel = max(0, min(sel, len(items) - 1))
             H, W = self.scr.getmaxyx()
-            listh = max(1, H - 5)
+            top = 4 if guide else 3  # first row of the list
+            listh = max(1, H - top - 2)
             off = min(off, sel)
             off = max(off, sel - listh + 1)
             self.scr.erase()
             self.put(0, 1, title[:W - 2], self.A["h1"])
             self.put(1, 1, ("Filter: " + query)[:W - 2])
+            if guide:
+                self.put(2, 1, guide[:W - 2], self.A["dim"])
             hint = empty_hint(query) if callable(empty_hint) else empty_hint
             if not items and hint:
-                self.put(3, 1, hint[:W - 2], self.A["dim"])
+                self.put(top, 1, hint[:W - 2], self.A["dim"])
             for r, (label, _) in enumerate(items[off:off + listh]):
                 attr = self.A["sel"] if off + r == sel else self.A["text"]
-                self.put(3 + r, 0, (" " + label)[:W - 1].ljust(W - 1), attr)
+                self.put(top + r, 0, (" " + label)[:W - 1].ljust(W - 1), attr)
             self.put(H - 1, 1, "type to filter · ↑↓ choose · Enter select · Esc cancel"[:W - 3], self.A["dim"])
             self.scr.move(1, min(9 + len(query), W - 1))
             self.scr.refresh()
@@ -1916,7 +1977,7 @@ class App:
             view = max(1, H - 3)
             top = max(0, min(top, len(rows) - view))
             self.scr.erase()
-            self.put(0, 1, "Help — law notes editor"[:W - 2], self.A["h1"])
+            self.put(0, 1, HELP_TITLE[:W - 2], self.A["h1"])
             for r, (text, attr, key, x) in enumerate(rows[top:top + view]):
                 if key:
                     self.put(r + 1, 1, key[:keyw], self.A["key"])
@@ -2135,7 +2196,7 @@ class App:
         self.say("Type the heading, then ↓ to fill in each line")
 
     def new_note(self):
-        name = self.prompt("New note (e.g. Contract/Offer and Acceptance): ")
+        name = self.prompt("New note (Folder/Name makes the folder, e.g. Contract/Offer): ")
         if not name or not name.strip("/ "):
             return
         try:
@@ -2557,6 +2618,7 @@ class App:
         finally:
             for pane, b in (self.buffers() if self.buf else []):
                 with self.viewing(pane):
+                    self.remember_position()
                     if self.buf.dirty and not self.safe_save():
                         self.write_recovery()
             self.history.snapshot(wait=True)
@@ -2762,7 +2824,7 @@ def main():
         print(__doc__)
         return
     if args and args[0] in ("-V", "--version"):
-        print(f"Law Notes {VERSION}")
+        print(f"Law Notes {VERSION} (beta)")
         return
     try:
         path = resolve_note(args[0]) if args and args[0].strip() else None

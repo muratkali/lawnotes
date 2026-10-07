@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.0
+
+- Labelled **beta**: README, `lawnotes --version`, the ^G help screen and the installer's closing message.
+- The note list says how to make folders: type Folder/Name (e.g. Contract/Offer) and press Enter.
+- Notes reopen where you left off.
+- Enter on an empty indented bullet moves it out a level instead of deleting the line.
+- The word count is cached instead of recounted on every screen update.
+- A failed history snapshot is logged instead of silently skipped.
+- Installer: when the home folder sits behind a link (e.g. /var → /private/var), notes in iCloud were reported as "on this Mac only"; paths are now compared after resolving links (also for the editor's "Notes in iCloud Drive/…" label). New tests cover the installer's empty-iCloud, this-Mac-only and app-not-built messages and the ~/.zshrc PATH line.
+
 ## 1.3.2
 
 - Closing a window or pane could cut short the final save: the editor can get SIGHUP twice (the terminal hanging up, and whatever closed it), and the second one interrupted saving. Further signals are now ignored once Law Notes starts closing. Found by a new test on the Mac's built-in Python 3.9.

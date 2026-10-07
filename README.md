@@ -1,6 +1,6 @@
-# Law Notes
+# Law Notes (beta)
 
-A small terminal editor for law notes on macOS. Notes are plain Markdown files, so any other app can open them too.
+**Beta:** a small terminal editor for law notes on macOS. It's tested and in daily use, but expect rough edges. Your notes are plain Markdown files, so any other app can open them and nothing is locked in.
 
 - Highlights case names (*Donoghue v Stevenson*), citations (`[1932] AC 562`) and statutes (`s 2(1)`, *Human Rights Act 1998*).
 - Templates for case briefs, IRAC problem answers, statutes, essay plans and lecture notes.
