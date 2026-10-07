@@ -78,6 +78,7 @@ RUNNING_FILE = os.path.join(CACHE_DIR, "running.json")      # single instance: w
 REQUEST_FILE = os.path.join(CACHE_DIR, "open-request.json")  # the launcher asks the open editor to open a note
 MESSAGE_FILE = os.path.join(CACHE_DIR, "update-message")     # written by update.py
 POSITIONS_FILE = os.path.join(CACHE_DIR, "positions.json")   # where each note was left
+ABBREV_FILE = os.path.join(NOTES_DIR, ".abbreviations.txt")  # in the notes folder, so it syncs
 LOG_FILE = os.path.join(CACHE_DIR, "lawnotes.log")           # starts, exits and why, crashes
 ICLOUD_LOGS = os.path.join(ICLOUD_DIR, "Law Notes Logs")     # the same log, one file per Mac
 ESCAPE_WAIT = 250  # ms to wait for the rest of an escape sequence: through herdr or a busy Mac,
@@ -185,6 +186,13 @@ STATUTE_RE = re.compile(
 # Not after Part/Schedule/Chapter, where V is a Roman numeral.
 PARTY_RE = re.compile(r"(?<!Part )(?<!Schedule )(?<!Chapter )(?<!Book )\b([DVC])\d?(?:['\u2019]s)?\b(?!-)")
 HEADING_RE = re.compile(r"^(#{1,6})\s")
+# A comment to yourself: // and everything after it (not the // in https://). Highlighted, and
+# left out of exports.
+COMMENT_RE = re.compile(r"(?:^|(?<=\s))//.*$")
+# Abbreviations expand when a word is finished (space, punctuation, Enter); add your own in
+# ABBREV_FILE, one "SHORT = Long form" per line (lawnotes --abbreviations opens it).
+DEFAULT_ABBREVIATIONS = {"CL": "Common Law", "EL": "Equity Law", "LCh": "Lord Chancellor"}
+ABBREV_ENDS = " .,;:!?)]}\"'\u201d\u2019"
 BULLET_RE = re.compile(r"^(\s*)([-*+]|\d+[.)]|>)(\s+)(\[[ xX]\]\s+)?")
 BOLD_RE = re.compile(r"\*\*[^*]+\*\*")
 ITALIC_RE = re.compile(r"(?<![*\w])[*_][^*_\s][^*_]*[*_](?![*\w])")
@@ -714,6 +722,10 @@ def export_markdown(lines):
     aren't part of a list kept as text (Markdown would otherwise turn them into code blocks)."""
     out, in_list = [], False  # in_list: the last non-blank line belongs to a list
     for line in lines:
+        if COMMENT_RE.search(line):  # comments are notes to yourself: not exported
+            line = COMMENT_RE.sub("", line).rstrip()
+            if not line.strip():
+                continue
         stripped = line.lstrip(" ")
         indent = len(line) - len(stripped)
         if re.fullmatch(r"[-*+]\s*", stripped):  # an empty bullet carries nothing, and a lone "-"
@@ -813,6 +825,30 @@ def export_note(path, lines, fmt):
                 raise ExportError("couldn't make the PDF")
         return out
     raise ExportError(f"unknown format {fmt}")
+
+
+def load_abbreviations(path=None):
+    """The built-in abbreviations plus yours ("SHORT = Long form" lines; yours win)."""
+    out = dict(DEFAULT_ABBREVIATIONS)
+    try:
+        with open(path or ABBREV_FILE, encoding="utf-8") as f:
+            for line in f:
+                short, sep, long = line.partition("=")
+                if sep and short.strip() and not short.strip().startswith("#") and long.strip():
+                    out[short.strip()] = long.strip()
+    except OSError:
+        pass
+    return out
+
+
+def expand_abbreviation(line, cx, abbreviations):
+    """If the word just before cx is an abbreviation, the line with it expanded and the new cursor
+    column; else None. Whole words and exact case only (CLR and cl stay as they are)."""
+    m = re.search(r"(?:^|(?<=[\s(\[\"'\u201c\u2018/]))([A-Za-z][A-Za-z0-9]*)$", line[:cx])
+    if not m or m.group(1) not in abbreviations:
+        return None
+    long = abbreviations[m.group(1)]
+    return line[:m.start(1)] + long + line[cx:], m.start(1) + len(long)
 
 
 def table_from_text(text):
@@ -1120,6 +1156,7 @@ HELP = [
     ("#", "Moving around"),
     ("^F", "Find. Press ^F and Enter again (or F3) for the next match; Esc clears the highlight."),
     ("^A  ^E", "Start / end of the line."),
+    ("Option+↑ ↓", "Top / bottom of the note."),
     ("Option+⌫", "Delete the word before the cursor (Option+Fn+⌫: the word after it)."),
     ("Option+←→", "Previous / next word."),
     ("PgUp PgDn", "Page up / down."),
@@ -1127,6 +1164,8 @@ HELP = [
     ("Shift+arrows", "Select text (Shift+Option+arrows selects by word). Click with the mouse to place the cursor, drag to select."),
     ("Double-click", "Selects a word, or a whole case name, citation or statute. Triple-click selects the line."),
     ("Scroll", "The mouse wheel moves the view only; the cursor stays where it was, and typing carries on there."),
+    ("//", "A comment to yourself: everything after // on a line is highlighted, and left out when you export."),
+    ("CL  EL  LCh", "Abbreviations expand as you type: CL → Common Law, EL → Equity Law, LCh → Lord Chancellor. Add your own with  lawnotes --abbreviations  (one  SHORT = Long form  per line). ^Z undoes an expansion."),
     ("Tables", "Copy a table in Word and paste it (⌘V or ^V): it becomes a Markdown table with lined-up columns, and exports back to Word as a real table."),
     ("^C  ^X  ^V", "Copy / cut / paste using the Mac clipboard: what you copy flashes green. With nothing selected, ^C and ^X take the whole line. ⌘V pastes too, but ⌘C can't copy text selected inside Law Notes (Terminal takes ⌘C): use ^C."),
     ("Typing", "With text selected, typing or Backspace replaces it."),
@@ -1161,11 +1200,15 @@ CSI_KEYS = {
     "[1;2D": curses.KEY_SLEFT, "[1;2C": curses.KEY_SRIGHT, "[1;2A": curses.KEY_SR, "[1;2B": curses.KEY_SF,
     "[1;2H": curses.KEY_SHOME, "[1;2F": curses.KEY_SEND,
     "[1;4D": "sel-word-left", "[1;6D": "sel-word-left", "[1;4C": "sel-word-right", "[1;6C": "sel-word-right",
+    "[1;3A": "doc-start", "[1;9A": "doc-start", "[1;3B": "doc-end", "[1;9B": "doc-end",
 }
 # Option/Ctrl(+Shift)+arrows as curses names them
 NAMED_KEYS = {"kLFT3": "word-left", "kLFT5": "word-left", "kRIT3": "word-right", "kRIT5": "word-right",
               "kLFT4": "sel-word-left", "kLFT6": "sel-word-left", "kRIT4": "sel-word-right", "kRIT6": "sel-word-right",
-              "kDC3": "delete-word-right", "kDC5": "delete-word-right"}
+              "kDC3": "delete-word-right", "kDC5": "delete-word-right", "kUP3": "doc-start", "kDN3": "doc-end"}
+# Option+arrow sent as Esc followed by an arrow (Terminal with Option as Meta)
+OPTION_ARROWS = {curses.KEY_UP: "doc-start", curses.KEY_DOWN: "doc-end", curses.KEY_LEFT: "word-left",
+                 curses.KEY_RIGHT: "word-right", curses.KEY_SLEFT: "sel-word-left", curses.KEY_SRIGHT: "sel-word-right"}
 # Shifted movement extends the selection
 SELECT_MOVES = {curses.KEY_SLEFT: curses.KEY_LEFT, curses.KEY_SRIGHT: curses.KEY_RIGHT,
                 curses.KEY_SR: curses.KEY_UP, curses.KEY_SF: curses.KEY_DOWN,
@@ -1198,6 +1241,7 @@ class App:
         self.hold_selection = False       # a double/triple click's release mustn't collapse it
         self.row_map = []       # screen row -> (line, start, end, last segment) for mouse clicks
         self.history = History()
+        self.abbreviations = load_abbreviations()
         self.speller = Speller(SPELL_LANG) if SPELL_ON and sys.platform == "darwin" else None
         curses.raw()  # deliver ^S ^Q ^Z ^C to us instead of the terminal
         scr.timeout(1000)
@@ -1232,6 +1276,7 @@ class App:
             "party_C": ((16, 117), (C.COLOR_BLACK, C.COLOR_CYAN)),
             "copied":  ((16, 120), (C.COLOR_BLACK, C.COLOR_GREEN)),
             "bar_off": ((181, 88), (C.COLOR_WHITE, C.COLOR_BLACK)),
+            "comment": ((16, 229), (C.COLOR_BLACK, C.COLOR_YELLOW)),
         }
         pairs = {}
         for n, (role, (c256, c8)) in enumerate(palette.items(), start=1):
@@ -1264,6 +1309,7 @@ class App:
             "party_C": pairs["party_C"] | curses.A_BOLD,
             "copied": pairs["copied"] | curses.A_BOLD,
             "bar_off": pairs["bar_off"],
+            "comment": pairs["comment"],
         }
         self.italic = italic
 
@@ -1359,6 +1405,8 @@ class App:
             self.save_failed = True
             self.say(f"SAVE FAILED ({e.strerror or e}) — {self.write_recovery()}", 3600)
             return False
+        if os.path.realpath(b.path) == os.path.realpath(ABBREV_FILE):
+            self.abbreviations = load_abbreviations()
         if note:
             self.say(note, 12)
         elif self.save_failed or announce:
@@ -1530,6 +1578,8 @@ class App:
             bm = BULLET_RE.match(line)
             if bm and not quote:
                 attrs[bm.start(2):bm.end(2)] = [A["bullet"]] * len(bm.group(2))
+        for cm in COMMENT_RE.finditer(line):  # // comments, like a highlighter pen
+            attrs[cm.start():] = [A["comment"]] * (len(line) - cm.start())
         if len(self._hl) > 5000:
             self._hl.clear()
         self._hl[line] = attrs
@@ -1776,6 +1826,13 @@ class App:
                 return ("key", "shift-enter")  # Option+Enter on terminals using Option as Meta
             if first in ("b", "f", "e", "d", "D", "w", "o", "\x7f", "\x08"):
                 return ("alt", first)
+            if isinstance(first, int):  # Esc + an arrow curses already decoded: Option+arrow
+                return ("key", OPTION_ARROWS.get(first))
+            if first == "\x1b":          # Esc + an arrow sequence curses didn't decode
+                inner = self.read_escape()
+                if inner and inner[0] == "key" and inner[1] in OPTION_ARROWS:
+                    return ("key", OPTION_ARROWS[inner[1]])
+                return inner
             if first not in ("[", "O"):
                 return None
             seq = first
@@ -2315,6 +2372,14 @@ class App:
         text = clipboard_get()
         self.paste_text(text if text is not None else getattr(self, "clip_text", ""))
 
+    def expand_abbreviation(self):
+        """A word just finished by typing: expand it if it's an abbreviation (^Z undoes it)."""
+        b = self.buf
+        done = expand_abbreviation(b.lines[b.cy], b.cx, self.abbreviations)
+        if done:
+            b.checkpoint("expand")
+            b.lines[b.cy], b.cx = done
+
     def paste_text(self, raw):
         """Paste (⌘V or ^V): a table from Word becomes a Markdown table on its own lines."""
         b = self.buf
@@ -2481,6 +2546,7 @@ class App:
         elif key == "esc":
             self.search = ""
         elif key == "shift-enter":
+            self.expand_abbreviation()
             b.newline(plain=True)
         elif key == "delete-word-left":
             b.delete_word_left()
@@ -2490,7 +2556,13 @@ class App:
             b.word_left()
         elif key == "word-right":
             b.word_right()
+        elif key == "doc-start":
+            b.cy = b.cx = 0
+        elif key == "doc-end":
+            b.cy = len(b.lines) - 1
+            b.cx = len(b.lines[b.cy])
         elif key in ENTER:
+            self.expand_abbreviation()
             b.newline()
         elif key in BACKSPACE:
             b.backspace()
@@ -2582,6 +2654,8 @@ class App:
         elif key == curses.KEY_NPAGE:
             self.move_vertical(self.rows - 1)
         elif isinstance(key, str) and len(key) == 1 and key.isprintable():
+            if key in ABBREV_ENDS:
+                self.expand_abbreviation()
             b.insert(key)
         elif isinstance(key, str) and len(key) == 1 and unicodedata.category(key) == "Zs":
             b.insert(" ")  # e.g. Option+Space types a non-breaking space

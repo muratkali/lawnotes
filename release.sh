@@ -35,11 +35,15 @@ grep -q "^## $version" CHANGELOG.md || fail "add a '## $version' section to CHAN
 ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null || fail "$tag already exists"
 
 sha=$(git rev-parse HEAD)
-ci=$(gh api "repos/$repo/commits/$sha/check-runs" | python3 -c '
+# GitHub sometimes starts the same workflow twice for one push and one copy can hang without a
+# runner: a commit counts as tested once one complete CI run on it has passed.
+ci=$(gh run list --repo "$repo" --commit "$sha" --workflow CI --json status,conclusion | python3 -c '
 import json, sys
-runs = json.load(sys.stdin)["check_runs"]
-print("none" if not runs else "pending" if any(r["status"] != "completed" for r in runs)
-      else "success" if all(r["conclusion"] in ("success", "skipped") for r in runs) else "failure")')
+runs = json.load(sys.stdin)
+done = [r for r in runs if r["status"] == "completed"]
+print("success" if any(r["conclusion"] == "success" for r in done)
+      else "failure" if any(r["conclusion"] not in ("cancelled", "skipped") for r in done)
+      else "pending" if runs else "none")')
 [ "$ci" = success ] || fail "CI is '$ci' for $sha; wait for it to pass (gh run watch)"
 
 signers=$(mktemp)

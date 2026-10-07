@@ -182,6 +182,27 @@ class TextTests(unittest.TestCase):
         self.assertIsNone(lawnotes.table_from_text("one line\twith a tab"))     # not a table
         self.assertIsNone(lawnotes.table_from_text("Para one\nPara\ttwo\nThree\nFour"))
 
+    def test_comments(self):
+        spans = lambda t: [m.group() for m in lawnotes.COMMENT_RE.finditer(t)]
+        self.assertEqual(spans("Duty of care // check Caparo"), ["// check Caparo"])
+        self.assertEqual(spans("// whole line"), ["// whole line"])
+        self.assertEqual(spans("see https://www.bailii.org/x"), [])           # a link isn't a comment
+        md = lawnotes.export_markdown(["Duty of care // check Caparo", "// to self", "Breach"])
+        self.assertEqual(md, "Duty of care\nBreach\n")                      # left out of exports
+
+    def test_abbreviations(self):
+        ab = {"CL": "Common Law", "EL": "Equity Law", "LCh": "Lord Chancellor"}
+        self.assertEqual(lawnotes.expand_abbreviation("At CL", 5, ab), ("At Common Law", 13))
+        self.assertEqual(lawnotes.expand_abbreviation("the LCh", 7, ab), ("the Lord Chancellor", 19))
+        self.assertIsNone(lawnotes.expand_abbreviation("CLR", 3, ab))          # whole words only
+        self.assertIsNone(lawnotes.expand_abbreviation("cl", 2, ab))           # exact case
+        self.assertIsNone(lawnotes.expand_abbreviation("xCL", 3, ab))
+        self.assertEqual(lawnotes.load_abbreviations(os.path.join(TMP, "none.txt")), lawnotes.DEFAULT_ABBREVIATIONS)
+        f = os.path.join(TMP, "abbr.txt")
+        open(f, "w").write("# mine\nRA = reasonable adult\nCL = common law\n")
+        self.assertEqual(lawnotes.load_abbreviations(f)["RA"], "reasonable adult")
+        self.assertEqual(lawnotes.load_abbreviations(f)["CL"], "common law")    # yours win
+
     def test_party_labels(self):
         found = lambda t: [m.group() for m in lawnotes.PARTY_RE.finditer(t)]
         self.assertEqual(found("D punched V. C sued D1 and D2."), ["D", "V", "C", "D1", "D2"])
@@ -409,6 +430,29 @@ class SessionTests(unittest.TestCase):
                          "| Case                 | Held      |\n"
                          "|----------------------|-----------|\n"
                          "| Donoghue v Stevenson | Duty owed |\n\n")
+
+    def test_typing_expands_abbreviations(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Abbr.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("x\n")
+        s = Session(note)
+        s.keys(b"\x05 The CL and EL; the LCh.", 0.5)
+        s.keys(b"\x1b[200~ CL pasted \x1b[201~", 0.4)               # pasting doesn't expand
+        s.keys(b" CLR\x13", 0.5)
+        self.assertTrue(s.quit())
+        self.assertEqual(open(note).read(), "x The Common Law and Equity Law; the Lord Chancellor. CL pasted  CLR\n")
+
+    def test_option_up_down_jump_to_ends(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Ends.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("".join(f"line {i}\n" for i in range(50)))
+        s = Session(note)
+        s.keys(b"\x1b[1;3BZ", 0.4)        # Option+Down (herdr / xterm form): end of the note
+        s.keys(b"\x1b\x1bOAA", 0.4)       # Option+Up as Esc + Up (Terminal with Option as Meta)
+        s.keys(b"\x13", 0.4)
+        self.assertTrue(s.quit())
+        lines = open(note).read().splitlines()
+        self.assertEqual((lines[0], lines[-1]), ("Aline 0", "line 49Z"))
 
     def test_note_list_explains_folders(self):
         os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)

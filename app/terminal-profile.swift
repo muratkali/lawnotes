@@ -28,9 +28,11 @@ let profile: [String: Any] = [
     "columnCount": 100,   // the 90-column text plus room
     "rowCount": 45,
     "CommandString": "__LAWNOTES_COMMAND__",
-    // Terminal sends Shift+Return as plain Return; send what herdr sends (CSI 13;2 u) so the
-    // editor can tell them apart. Key format: $ = Shift, then the key's hex code.
-    "keyMapBoundKeys": ["$000D": "\u{1b}[13;2u"],
+    // Terminal sends Shift+Return as plain Return, and Shift+Option+Left/Right the same as
+    // Option+Left/Right (word moves); send what herdr and xterm send, so the editor can tell them
+    // apart. Key format: $ = Shift, ~ = Option, then the key's hex code (F702 Left, F703 Right).
+    "keyMapBoundKeys": ["$000D": "\u{1b}[13;2u", "$~F702": "\u{1b}[1;4D", "$~F703": "\u{1b}[1;4C",
+                        "~F700": "\u{1b}[1;3A", "~F701": "\u{1b}[1;3B"],  // Option+Up/Down: top/bottom
     "RunCommandAsShell": true,
     "shellExitAction": 1,  // close the window when Law Notes quits normally
     "useOptionAsMetaKey": true,  // Option+Enter, Option+arrows

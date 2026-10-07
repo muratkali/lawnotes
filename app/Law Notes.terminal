@@ -412,6 +412,14 @@
 	<dict>
 		<key>$000D</key>
 		<string>[13;2u</string>
+		<key>$~F702</key>
+		<string>[1;4D</string>
+		<key>$~F703</key>
+		<string>[1;4C</string>
+		<key>~F700</key>
+		<string>[1;3A</string>
+		<key>~F701</key>
+		<string>[1;3B</string>
 	</dict>
 	<key>name</key>
 	<string>Law Notes</string>

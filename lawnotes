@@ -8,6 +8,7 @@
     lawnotes --update          install the newest signed release now
     lawnotes --rollback        go back to the previous version
     lawnotes --export NOTE docx|pdf   export a note to Word or PDF (into Downloads)
+    lawnotes --abbreviations   edit your abbreviations (CL = Common Law, …)
     lawnotes --version         show the installed version
     lawnotes --uninstall       remove Law Notes (your notes stay)
 
@@ -141,6 +142,16 @@ def main():
     if flag in ("--self-test", "--export"):
         return subprocess.run([sys.executable, EDITOR] + args).returncode
 
+    if flag == "--abbreviations":  # open the abbreviations file like a note
+        notes = os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes"))
+        note = os.path.join(notes, ".abbreviations.txt")
+        if not os.path.exists(note):
+            os.makedirs(notes, exist_ok=True)
+            with open(note, "w") as f:
+                f.write("# Abbreviations: they expand when you finish the word (space, punctuation, Enter).\n"
+                        "# One per line: SHORT = Long form. Exact case; whole words only.\n"
+                        "CL = Common Law\nEL = Equity Law\nLCh = Lord Chancellor\n")
+        flag = None
     in_herdr = bool(os.environ.get("HERDR_PANE_ID")) and shutil.which("herdr")
     mode = {"--window": "window", "--app": "window", "--split": "split", "--here": "here"}.get(
         flag, "tab" if in_herdr else "here")

@@ -96,6 +96,10 @@ class ReleaseTests(unittest.TestCase):
         self.assertTrue(os.access(window, os.X_OK))
         self.assertIn('current/lawnotes" --here', open(window).read())
         self.assertIn("<key>$000D</key>", text)  # Shift+Return mapped for the editor
+        self.assertIn("<key>$~F702</key>", text)  # Shift+Option+Left/Right select by word
+        self.assertIn("<key>$~F703</key>", text)
+        self.assertIn("<key>~F701</key>", text)   # Option+Down/Up: end/start of the note
+        self.assertIn("<key>~F700</key>", text)
         self.assertTrue(os.path.islink(os.path.join(self.home, "UCL", "notes")) or
                         os.path.isdir(os.path.join(self.home, "UCL", "notes")))
         self.assertIn("Law Notes", self.lawnotes_cmd("--version").stdout)

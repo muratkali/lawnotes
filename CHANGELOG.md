@@ -4,6 +4,10 @@
 
 - Labelled **beta**: README, `lawnotes --version`, the ^G help screen and the installer's closing message.
 - Paste tables from Word (⌘V or ^V): they become Markdown tables with lined-up columns, and export back to Word as real tables. A cell with several paragraphs stays one cell.
+- Abbreviations expand as you type: CL → Common Law, EL → Equity Law, LCh → Lord Chancellor; add your own with `lawnotes --abbreviations` (the list lives in the notes folder, so it syncs). Whole words and exact case only; ^Z undoes an expansion; pasting never expands.
+- Comments: everything after `//` on a line is highlighted and left out of exports (`https://` links aren't comments).
+- Option+Down / Option+Up jump to the end / start of the note. Option arrows that arrive as Esc + arrow (Terminal with Option as Meta) are understood too.
+- Shift+Option+Left/Right select by word in the Law Notes window: its Terminal profile now sends them as distinct keys (Terminal itself sends them the same as Option+Left/Right).
 - The note list says how to make folders: type Folder/Name (e.g. Contract/Offer) and press Enter.
 - Notes reopen where you left off.
 - Enter on an empty indented bullet moves it out a level instead of deleting the line.
