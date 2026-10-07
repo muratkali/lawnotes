@@ -2,6 +2,7 @@
 
 ## 1.4.1
 
+- Tab / Shift+Tab with lines selected indent / outdent all of them by two spaces, keeping the selection (blank lines stay blank).
 - Highlight text: select it and press `=` (or Option+H, which also works on the word under the cursor). It's stored as `==text==`, shown with a yellow highlighter background, and exported to Word as a real yellow highlight (and to PDF). Press again to remove it.
 
 ## 1.4.0

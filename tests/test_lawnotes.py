@@ -481,6 +481,18 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(s.quit())
         self.assertEqual(open(note).read(), "the ==ratio== decidendi binds\n==Other== line here\n")
 
+    def test_tab_indents_selected_lines(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Indent.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("- alpha\n- beta\n\n- gamma\n- delta\n")
+        s = Session(note)
+        s.keys(b"\x1b[1;2B" * 4, 0.4)      # Shift+Down x4: lines 1-4 selected (ends at column 0 of line 5)
+        s.keys(b"\t\t", 0.4)              # Tab twice: indent the selected lines (blank line left alone)
+        s.keys(b"\x1b[Z", 0.4)             # Shift+Tab: back one step
+        s.keys(b"\x13", 0.4)
+        self.assertTrue(s.quit())
+        self.assertEqual(open(note).read(), "  - alpha\n  - beta\n\n  - gamma\n- delta\n")
+
     def test_note_list_explains_folders(self):
         os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
         open(os.path.join(lawnotes.NOTES_DIR, "Existing.md"), "w").write("# Existing\n")

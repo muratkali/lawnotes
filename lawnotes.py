@@ -1149,7 +1149,7 @@ HELP = [
     ("#", "Writing"),
     ("Enter", "New line. Continues bullets and numbered lists; Enter on an empty bullet ends the list."),
     ("Shift+Enter", "New line under the same bullet, without a new bullet. Option+Enter does the same."),
-    ("Tab", "Indent a bullet (Shift+Tab to outdent)."),
+    ("Tab", "Indent a bullet (Shift+Tab to outdent). With lines selected, Tab / Shift+Tab indent / outdent all of them."),
     ("^T", "Insert a template: case brief, problem question (IRAC), statute, essay plan, lecture notes."),
     ("^W", "Spelling: suggestions for the highlighted word, add it to your dictionary, or ignore it."),
     ("#", "Searching"),
@@ -2346,6 +2346,29 @@ class App:
         except (ExportError, OSError, subprocess.SubprocessError) as e:
             self.say(f"Export failed: {e}", 12)
 
+    def indent_selection(self, direction):
+        """Indent (1) or outdent (-1) every selected line by two spaces, keeping the selection.
+        A selection ending at the start of a line doesn't include that line; blank lines stay blank."""
+        (y1, x1), (y2, x2) = self.selection()
+        last = y2 - 1 if x2 == 0 and y2 > y1 else y2
+        b = self.buf
+        b.checkpoint("indent")
+        shift = {}
+        for y in range(y1, last + 1):
+            line = b.lines[y]
+            if direction > 0:
+                if line.strip():
+                    b.lines[y], shift[y] = "  " + line, 2
+            else:
+                n = min(2, len(line) - len(line.lstrip(" ")))
+                b.lines[y], shift[y] = line[n:], -n
+
+        def moved(y, x):  # a point at the start of a line stays there, so whole lines stay selected
+            return (y, x) if x == 0 else (y, max(0, x + shift.get(y, 0)))
+        self.anchor = moved(*self.anchor)
+        b.cy, b.cx = moved(b.cy, b.cx)
+        self.want_x = None
+
     def toggle_highlight(self):
         """==highlight== the selection, or the word under the cursor; again to remove it."""
         b = self.buf
@@ -2556,6 +2579,10 @@ class App:
         vertical = key in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE)
         was_cutting, self.cutting = self.cutting, False
 
+        # Tab / Shift+Tab with lines selected indent / outdent them all
+        if key in ("\t", curses.KEY_BTAB) and self.selection():
+            self.indent_selection(-1 if key == curses.KEY_BTAB else 1)
+            return
         # = with text selected highlights it (or removes the highlight); Option+H does the same,
         # and with nothing selected highlights the word under the cursor
         if (key == "=" and self.selection()) or key == "highlight":
