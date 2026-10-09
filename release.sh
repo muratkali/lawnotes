@@ -5,10 +5,10 @@
 # commit; then signs the tag with the release key, pushes it and creates the GitHub
 # release.
 #
-# Signing needs you: the release key lives in 1Password, whose SSH agent asks you to approve
-# each signature (Touch ID), so nothing else on this Mac can sign a release. Without 1Password,
-# unlock the key in the system ssh-agent first:
-#   ssh-add -t 900 ~/.ssh/lawnotes_release_ed25519     # asks for the passphrase; 15 minutes
+# Signing needs you: the release key lives only in 1Password, whose SSH agent asks you to
+# approve each signature (Touch ID), so nothing else on this Mac can sign a release.
+# $key.pub (the public half) tells the script which key to ask for; LAWNOTES_SIGN_AGENT can
+# name another agent that holds the key.
 #
 # Every Mac picks a release up within a day (after verifying the signature and running
 # the self-test), or straight away with `lawnotes --update`.
@@ -53,7 +53,7 @@ for sock in "${LAWNOTES_SIGN_AGENT:-}" "$onepassword" "${SSH_AUTH_SOCK:-}"; do
   [ -n "$sock" ] && [ -S "$sock" ] || continue
   if SSH_AUTH_SOCK="$sock" ssh-add -L 2>/dev/null | grep -qF "$pub"; then agent="$sock"; break; fi
 done
-[ -n "$agent" ] || fail "the release key isn't available: add it to 1Password, or ssh-add -t 900 $key"
+[ -n "$agent" ] || fail "the release key isn't available: is 1Password running and unlocked, with its SSH agent on?"
 export SSH_AUTH_SOCK="$agent"
 [ "$agent" = "$onepassword" ] && echo "Signing with 1Password: approve the request (Touch ID)."
 

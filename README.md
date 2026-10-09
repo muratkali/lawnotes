@@ -86,7 +86,7 @@ CI runs the tests on macOS with the system Python (what a fresh Mac has) and a c
 
 1. Make sure CI passed on `main`.
 2. Set `VERSION` in `lawnotes.py` and add a `## X.Y.Z` section to `CHANGELOG.md`, then commit and push.
-3. When CI is green again, run `./release.sh X.Y.Z`. It checks all of the above, then signs the tag with the release key from 1Password (approve the request with Touch ID), pushes it and creates the GitHub release. Without 1Password, unlock the key first with `ssh-add -t 900 ~/.ssh/lawnotes_release_ed25519`.
+3. When CI is green again, run `./release.sh X.Y.Z`. It checks all of the above, then signs the tag with the release key, which lives only in 1Password (approve the request with Touch ID), pushes it and creates the GitHub release. `~/.ssh/lawnotes_release_ed25519.pub` tells the script which key to ask for.
 4. Run `lawnotes --update` on one Mac and open a note before the others update themselves.
 
 Versions follow semver: patch for fixes, minor for features, major for changes to the notes layout or history store.
