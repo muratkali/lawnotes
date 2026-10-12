@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.2
+
+- Clicks, drags and the scroll wheel in Ghostty were typed into the note as text like `64;45;41M`. Ghostty's terminal description says mouse reports start with `ESC [ <`, so curses took that much as a "mouse key" and passed the rest through as typing. Law Notes now reads the rest of the report itself. Tested with Ghostty's own terminal description and in a new test.
+
 ## 1.4.1
 
 - Tab / Shift+Tab with lines selected indent / outdent all of them by two spaces, keeping the selection (blank lines stay blank).

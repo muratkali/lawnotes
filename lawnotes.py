@@ -54,7 +54,7 @@ import traceback
 import unicodedata
 from functools import lru_cache
 
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 HELP_TITLE = "Help — Law Notes (beta)"
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
 NOTES_DIR = os.path.abspath(os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes")))
@@ -1211,6 +1211,12 @@ NAMED_KEYS = {"kLFT3": "word-left", "kLFT5": "word-left", "kRIT3": "word-right",
               "kLFT4": "sel-word-left", "kLFT6": "sel-word-left", "kRIT4": "sel-word-right", "kRIT6": "sel-word-right",
               "kDC3": "delete-word-right", "kDC5": "delete-word-right", "kUP3": "doc-start", "kDN3": "doc-end"}
 # Option+arrow sent as Esc followed by an arrow (Terminal with Option as Meta)
+def sgr_mouse(body):
+    """An SGR mouse report after its ESC [ < ("0;12;5M"): (button, x, y, pressed), 0-based; else None."""
+    m = re.fullmatch(r"(\d+);(\d+);(\d+)([Mm])", body)
+    return (int(m.group(1)), int(m.group(2)) - 1, int(m.group(3)) - 1, m.group(4) == "M") if m else None
+
+
 OPTION_ARROWS = {curses.KEY_UP: "doc-start", curses.KEY_DOWN: "doc-end", curses.KEY_LEFT: "word-left",
                  curses.KEY_RIGHT: "word-right", curses.KEY_SLEFT: "sel-word-left", curses.KEY_SRIGHT: "sel-word-right"}
 # Shifted movement extends the selection
@@ -1244,6 +1250,7 @@ class App:
         self.last_click = (0.0, None, 0)  # time, position, count: for double and triple clicks
         self.hold_selection = False       # a double/triple click's release mustn't collapse it
         self.row_map = []       # screen row -> (line, start, end, last segment) for mouse clicks
+        self.mouse_event = None  # a mouse report curses half-decoded as KEY_MOUSE (see get_key)
         self.history = History()
         self.abbreviations = load_abbreviations()
         self.speller = Speller(SPELL_LANG) if SPELL_ON and sys.platform == "darwin" else None
@@ -1821,9 +1828,34 @@ class App:
     # Input helpers
     def get_key(self):
         try:
-            return self.scr.get_wch()
+            key = self.scr.get_wch()
         except curses.error:
             return None
+        if key == curses.KEY_MOUSE:
+            # Some terminals' terminfo (Ghostty's) says mouse reports start with ESC [ <, so curses
+            # takes that much as KEY_MOUSE and leaves the rest ("0;12;5M"): read it here, or it
+            # would be typed into the note.
+            self.mouse_event = self.read_mouse_rest()
+        return key
+
+    def read_mouse_rest(self):
+        """The rest of an SGR mouse report after its ESC [ <: (button, x, y, pressed) or None."""
+        self.scr.timeout(ESCAPE_WAIT)
+        seq = ""
+        try:
+            while len(seq) < 24:
+                try:
+                    ch = self.scr.get_wch()
+                except curses.error:
+                    break
+                if not isinstance(ch, str):
+                    break
+                seq += ch
+                if not (ch.isdigit() or ch == ";"):
+                    break
+        finally:
+            self.scr.timeout(1000)
+        return sgr_mouse(seq)
 
     def read_escape(self):
         """After ESC: ('paste', text), ('alt', 'b'|'f'), ('key', name) or None for a plain Esc."""
@@ -1853,9 +1885,8 @@ class App:
                     break
             if seq == "[200~":
                 return ("paste", self.read_paste())
-            m = re.fullmatch(r"\[<(\d+);(\d+);(\d+)([Mm])", seq)  # SGR mouse report
-            if m:
-                return ("mouse", (int(m.group(1)), int(m.group(2)) - 1, int(m.group(3)) - 1, m.group(4) == "M"))
+            if seq.startswith("[<") and sgr_mouse(seq[2:]):  # SGR mouse report
+                return ("mouse", sgr_mouse(seq[2:]))
             if seq not in CSI_KEYS:
                 self.log_once("unrecognised key sequence ESC" + repr(seq)[1:-1])
             return ("key", CSI_KEYS.get(seq))  # None: a key we don't use, swallowed whole
@@ -2558,6 +2589,9 @@ class App:
                         "D": "split-down", "w": "close-pane", "o": "next-pane", "h": "highlight",
                         "\x7f": "delete-word-left", "\x08": "delete-word-left"}[r[1]]
             return r[1]  # a curses key, a name, or None for keys we don't use
+        if key == curses.KEY_MOUSE:
+            event, self.mouse_event = self.mouse_event, None
+            return ("mouse", event) if event else None
         if isinstance(key, int) and key != curses.KEY_RESIZE:
             return NAMED_KEYS.get(curses.keyname(key).decode(errors="ignore"), key)
         return key

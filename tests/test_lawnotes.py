@@ -312,7 +312,7 @@ class Session:
     def __init__(self, *args, env=None):
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            os.environ.update(TERM="xterm-256color", **(env or {}))
+            os.environ.update({"TERM": "xterm-256color", **(env or {})})
             os.execv(sys.executable, [sys.executable, os.path.join(ROOT, "lawnotes.py"), *args])
         import fcntl
         import termios
@@ -361,6 +361,23 @@ class SessionTests(unittest.TestCase):
         s.keys(click(3, 3) + click(3, 3) + click(3, 3) + b"X\x13", 0.6)  # triple-click a line
         self.assertTrue(s.quit())
         self.assertEqual(open(note).read().splitlines(), ["Breach owed by D", "Caparo [1932] AC 562 applies", "X"])
+
+    def test_clicks_where_terminfo_claims_mouse_prefix(self):
+        # Ghostty's terminfo has kmous=\E[<, so curses returns KEY_MOUSE for ESC [ < and leaves the
+        # rest of each report; it used to be typed into the note ("64;45;41M64;45;41M...").
+        terminfo = tempfile.mkdtemp(dir=TMP)
+        src = os.path.join(terminfo, "kmous.src")
+        open(src, "w").write("lawnotes-kmous|xterm-256color plus Ghostty mouse key,\n\tkmous=\\E[<, use=xterm-256color,\n")
+        subprocess.run(["tic", "-o", terminfo, src], check=True, capture_output=True)
+        note = os.path.join(lawnotes.NOTES_DIR, "Ghostty.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("Duty owed by D\nthird line\n")
+        click = lambda col, row: f"\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m".encode()
+        s = Session(note, env={"TERM": "lawnotes-kmous", "TERMINFO": terminfo})
+        s.keys(click(2, 1) + click(2, 1) + b"Breach", 0.5)        # double-click a word
+        s.keys(b"\x1b[<65;5;2M" * 3 + click(3, 2) + b"X\x13", 0.6)  # wheel, then click and type
+        self.assertTrue(s.quit())
+        self.assertEqual(open(note).read().splitlines(), ["Breach owed by D", "tXhird line"])
 
     def test_star_wraps_selection(self):
         note = os.path.join(lawnotes.NOTES_DIR, "Wrap.md")
