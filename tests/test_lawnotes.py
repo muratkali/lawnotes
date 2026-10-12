@@ -156,6 +156,70 @@ class TextTests(unittest.TestCase):
         self.assertEqual([m.group() for m in lawnotes.STATUTE_RE.finditer("s 2(1) of the Human Rights Act 1998")],
                          ["s 2(1)", "Human Rights Act 1998"])
 
+    def test_articles_and_treaties(self):
+        statutes = lambda s: [m.group() for m in lawnotes.STATUTE_RE.finditer(s)]
+        self.assertEqual(statutes("Article 1 (1) and Article 1.1. apply"), ["Article 1 (1)", "Article 1.1"])
+        self.assertEqual(statutes("Read Art. 1 TEU. See Art. 3 (5) TEU and Art. 21 (1) and (2) TEU"),
+                         ["Art. 1 TEU", "Art. 3 (5) TEU", "Art. 21 (1) and (2) TEU"])
+        self.assertEqual(statutes("Articles 49 and 50 TEU; Articles 4 (1) and 5 (in toto)"),
+                         ["Articles 49 and 50 TEU", "Articles 4 (1) and 5"])
+        self.assertEqual(statutes("the TFEU and the TEU, not TEUs"), ["TFEU", "TEU"])
+        self.assertEqual(statutes("Part 1 of the Arts and Humanities course"), [])
+
+    def test_theme_files(self):
+        for name, palette in lawnotes.THEMES.items():
+            self.assertEqual(lawnotes.parse_theme(lawnotes.theme_text(name, palette)), (palette, []), name)
+        palette, problems = lawnotes.parse_theme(
+            "# mine\nbackground = #000000\ntext = #ffffff\nselection = #000 on #ff8700\nbogus = 1\nkeys = #zzz\n")
+        self.assertEqual(palette["text"], (231, 16))     # white on the new black background
+        self.assertEqual(palette["h1"], (208, 16))       # unchanged colour, new background
+        self.assertEqual(palette["sel"], (16, 208))
+        self.assertEqual(palette["bar"], lawnotes.THEMES["NERV"]["bar"])  # its own background stays
+        self.assertEqual(problems, ["line 5: unknown name “bogus”",
+                                    "line 6: “#zzz” isn't a colour: use #rrggbb or a number 0–255"])
+
+    def test_spelling_preview_and_next_suggestion(self):
+        class Speller:
+            state = "ready"
+            guesses = {"recieve": ["receive", "relieve", "reprieve", "recede"]}
+
+            def lookup(self, line):
+                i = line.find("recieve")
+                return ((i, 7),) if i >= 0 else ()
+
+            def wait_for(self, lines):
+                pass
+
+            def suggestions(self, word):
+                return self.guesses.get(word, [])
+        app = object.__new__(lawnotes.App)
+        app.speller, app.ignored, app.protected, app.spell_cycle = Speller(), set(), set(), None
+        app.highlight = lambda line: [0] * len(line)
+        menus = []
+        app.spelling_menu = lambda *args: menus.append(args)
+        b = app.buf = lawnotes.Buffer(os.path.join(TMP, "Spell.md"))
+        b.lines, b.cy, b.cx = ["fine", "I recieve it"], 0, 0
+        self.assertIsNone(app.spell_hint())
+        app.fix_spelling()                                    # not on a mistake: go to the next one
+        self.assertEqual((b.cy, b.cx), (1, 2))
+        self.assertEqual(app.spell_hint(), "recieve → receive   ^W to fix")
+        app.fix_spelling()                                    # makes the correction shown
+        self.assertEqual(b.lines[1], "I receive it")
+        self.assertEqual(app.spell_hint(), "✓ recieve → receive   ^W next: relieve · ^Z undo")
+        app.fix_spelling()
+        app.fix_spelling()
+        self.assertEqual(b.lines[1], "I reprieve it")
+        self.assertEqual(app.spell_hint(), "✓ recieve → reprieve   ^W more options · ^Z undo")
+        b.undo()                                              # one ^Z undoes the whole fix
+        self.assertEqual(b.lines[1], "I recieve it")
+        b.cy, b.cx = 1, 12
+        app.fix_spelling()
+        app.fix_spelling()
+        app.fix_spelling()
+        app.fix_spelling()                                    # past the third: back, and the full list
+        self.assertEqual(b.lines[1], "I recieve it")
+        self.assertEqual(menus, [(1, 2, "recieve", ["receive", "relieve", "reprieve", "recede"])])
+
     def test_italic_typo_does_not_crash(self):
         """Scrolling tort.md crashed: pair_number() overflowed on an italic misspelt word."""
         import curses
@@ -378,6 +442,53 @@ class SessionTests(unittest.TestCase):
         s.keys(b"\x1b[<65;5;2M" * 3 + click(3, 2) + b"X\x13", 0.6)  # wheel, then click and type
         self.assertTrue(s.quit())
         self.assertEqual(open(note).read().splitlines(), ["Breach owed by D", "tXhird line"])
+
+    def test_undo_brings_back_selection(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Undo.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("alpha beta gamma\n")
+        select5 = b"\x01" + b"\x1b[1;2C" * 5                    # select "alpha"
+        s = Session(note)
+        s.keys(select5 + b"\x1b[C" + b"\x1a" + b"X", 0.6)        # move away, ^Z: selected again, X replaces it
+        s.keys(b"\x01" + b"\x1b[1;2C" * 6 + b"Y\x1a" + b"Z\x13", 0.6)  # "X beta": typed over, ^Z selects it again
+        self.assertTrue(s.quit())
+        self.assertEqual(open(note).read().splitlines(), ["Z gamma"])
+
+    def test_right_click_menu(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Menu.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("alpha beta\n")
+        s = Session(note)
+        screen = s.keys(b"\x1b[<2;8;1M\x1b[<2;8;1m", 0.5)          # right-click "beta"
+        self.assertIn("Select word", screen)
+        s.keys(b"\x1b[<0;11;4M\x1b[<0;11;4m", 0.5)                 # click "Select word" (the 2nd item)
+        s.keys(b"X", 0.3)                                            # typing replaces the selected word
+        s.keys(b"\x01" + b"\x1b[1;2C" * 5, 0.4)                     # select "alpha"
+        s.keys(b"\x1b[<2;4;1M\x1b[<2;4;1m", 0.5)                  # right-click inside the selection
+        s.keys(b"\x1b[B" * 5 + b"\r\x13", 0.6)                      # Cut Copy Paste Highlight Italic Bold
+        s.keys(b"\x1b[<2;4;1M\x1b[<2;4;1m", 0.5)
+        s.keys(b"\x1b[B" * 5 + b"\r", 0.8)                          # Paste Select Highlight Undo Redo Split
+        screen = s.keys(b"\x1b", 0.8)                                # Esc: the same note in the new pane
+        self.assertEqual(screen.count("Menu.md"), 2)                  # two status bars
+        self.assertTrue(s.quit())
+        self.assertEqual(open(note).read().splitlines(), ["**alpha** X"])
+
+    def test_new_theme_and_switching(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Themed.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("text\n")
+        settings = os.path.join(lawnotes.NOTES_DIR, ".settings.json")
+        s = Session(note)
+        s.keys(b"\x1b[17~", 0.5)                                 # F6: themes
+        s.keys(b"new\r", 0.5)
+        s.keys(b"Mine\r", 0.8)                                   # a copy of NERV, opened to change
+        screen = s.keys(b"\x13", 0.6)                            # saving it applies it
+        self.assertIn("updated", screen)
+        s.keys(b"\x1b[17~" + b"Paper\r", 0.8)
+        self.assertTrue(s.quit())
+        mine = os.path.join(lawnotes.NOTES_DIR, ".themes", "Mine.txt")
+        self.assertEqual(open(mine).read(), lawnotes.theme_text("Mine", lawnotes.THEMES["NERV"]))
+        self.assertEqual(json.load(open(settings)), {"theme": "Paper"})
 
     def test_star_wraps_selection(self):
         note = os.path.join(lawnotes.NOTES_DIR, "Wrap.md")

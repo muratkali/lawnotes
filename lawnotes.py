@@ -23,7 +23,8 @@ Keys (press ^G inside the editor for this list)
   ^F find (Enter again or F3 for the next match; Esc clears the highlight)
   ^T insert template (case brief, IRAC, statute, essay plan, lecture)
   ^L outline — jump to a heading or a case mentioned in this note
-  ^W spelling — suggestions for the highlighted word, or add it to your dictionary
+  ^W spelling — fix the misspelt word with the correction the status bar shows
+  Option+T themes — pick a colour theme, or make your own
   Shift+Enter   new line without a new bullet (Option+Enter also works)
   ^P search all notes   ^B case index (every case across all notes)
   ^R version history — restore an earlier version of this note
@@ -54,7 +55,7 @@ import traceback
 import unicodedata
 from functools import lru_cache
 
-VERSION = "1.4.2"
+VERSION = "1.5.0"
 HELP_TITLE = "Help — Law Notes (beta)"
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
 NOTES_DIR = os.path.abspath(os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes")))
@@ -67,6 +68,7 @@ CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 CACHE_DIR = os.path.expanduser("~/.cache/lawnotes")
 SPELL_LANG = os.environ.get("LAWNOTES_LANG", "en_GB")
 SPELL_ON = os.environ.get("LAWNOTES_SPELL", "1") != "0"
+SPELL_CYCLE = 3  # ^W tries this many suggestions in place before showing the full list
 MOUSE_ON = os.environ.get("LAWNOTES_MOUSE", "1") != "0"
 # Snapshots live in a private git store on this Mac, outside the notes folder, because the notes
 # folder may be synced (iCloud Drive) and cloud sync corrupts git stores.
@@ -168,6 +170,162 @@ TEMPLATES = [
     ]),
 ]
 
+# --- Themes ------------------------------------------------------------------
+
+THEMES_DIR = os.path.join(NOTES_DIR, ".themes")            # your themes: in the notes folder, so they sync
+SETTINGS_FILE = os.path.join(NOTES_DIR, ".settings.json")  # which theme is in use (synced too)
+DEFAULT_THEME = "NERV"
+# Each role's (text colour, background) as xterm 256-colour numbers
+THEMES = {
+    "NERV": {  # blood-red background, warning-orange headings, Unit-01 green and purple
+        "text": (224, 52), "h1": (208, 52), "h": (214, 52), "case": (220, 52), "cite": (217, 52),
+        "statute": (119, 52), "bullet": (141, 52), "quote": (181, 52), "match": (16, 208),
+        "bar": (230, 88), "key": (16, 208), "dim": (174, 52), "sel": (16, 208), "spell": (231, 160),
+        "party_D": (16, 214), "party_V": (16, 218), "party_C": (16, 117), "copied": (16, 120),
+        "bar_off": (181, 88), "comment": (16, 229), "mark": (16, 226),
+    },
+    "Unit-01": {  # Evangelion Unit-01: deep purple with acid green
+        "text": (194, 54), "h1": (118, 54), "h": (154, 54), "case": (191, 54), "cite": (183, 54),
+        "statute": (214, 54), "bullet": (118, 54), "quote": (189, 54), "match": (16, 214),
+        "bar": (16, 112), "key": (16, 118), "dim": (140, 54), "sel": (16, 118), "spell": (231, 160),
+        "party_D": (16, 214), "party_V": (16, 218), "party_C": (16, 117), "copied": (16, 120),
+        "bar_off": (189, 91), "comment": (16, 229), "mark": (16, 226),
+    },
+    "Paper": {  # light: dark ink on cream, for daylight
+        "text": (235, 230), "h1": (124, 230), "h": (130, 230), "case": (94, 230), "cite": (125, 230),
+        "statute": (28, 230), "bullet": (91, 230), "quote": (242, 230), "match": (16, 220),
+        "bar": (230, 124), "key": (231, 124), "dim": (244, 230), "sel": (231, 25), "spell": (231, 160),
+        "party_D": (16, 214), "party_V": (16, 218), "party_C": (16, 117), "copied": (16, 120),
+        "bar_off": (238, 252), "comment": (16, 229), "mark": (16, 226),
+    },
+}
+# The names theme files use, in the order New theme writes them
+THEME_ROLES = [
+    ("text", "text"), ("title", "h1"), ("headings", "h"), ("case-names", "case"), ("citations", "cite"),
+    ("statutes", "statute"), ("bullets", "bullet"), ("quotes", "quote"), ("hints", "dim"),
+    ("comments", "comment"), ("highlights", "mark"), ("misspelt", "spell"), ("selection", "sel"),
+    ("search", "match"), ("copied", "copied"), ("keys", "key"), ("status-bar", "bar"),
+    ("status-bar-other-panes", "bar_off"), ("party-d", "party_D"), ("party-v", "party_V"),
+    ("party-c", "party_C"),
+]
+_CUBE = (0, 95, 135, 175, 215, 255)
+_ANSI = [(0, 0, 0), (205, 0, 0), (0, 205, 0), (205, 205, 0), (0, 0, 238), (205, 0, 205), (0, 205, 205),
+         (229, 229, 229), (127, 127, 127), (255, 0, 0), (0, 255, 0), (255, 255, 0), (92, 92, 255),
+         (255, 0, 255), (0, 255, 255), (255, 255, 255)]
+
+
+def xterm_rgb(n):
+    """The (r, g, b) of an xterm 256-colour number."""
+    if n < 16:
+        return _ANSI[n]
+    if n >= 232:
+        return (8 + 10 * (n - 232),) * 3
+    n -= 16
+    return (_CUBE[n // 36], _CUBE[n // 6 % 6], _CUBE[n % 6])
+
+
+def parse_colour(text):
+    """#rrggbb, #rgb or 0–255 as an xterm 256-colour number (the nearest one for #rrggbb)."""
+    t = text.strip().lower()
+    if re.fullmatch(r"#[0-9a-f]{6}|#[0-9a-f]{3}", t):
+        step = 2 if len(t) == 7 else 1
+        rgb = tuple(int(t[i:i + step] * (3 - step), 16) for i in range(1, len(t), step))
+        return min(range(16, 256), key=lambda n: sum((a - b) ** 2 for a, b in zip(xterm_rgb(n), rgb)))
+    if t.isdigit() and int(t) < 256:
+        return int(t)
+    raise ValueError(f"“{text.strip()}” isn't a colour: use #rrggbb or a number 0–255")
+
+
+def theme_text(name, palette):
+    """A theme file for a palette: what New theme writes, for you to change."""
+    hexa = lambda n: "#%02x%02x%02x" % xterm_rgb(n)
+    bg = palette["text"][1]
+    out = [f"# Law Notes theme “{name}”. Change a colour and save (^S): Law Notes updates straight away.",
+           "# Colours are #rrggbb (or an xterm number 0–255). “#000000 on #ff8700” sets the background too.",
+           "# Terminals show 256 colours, so Law Notes uses the nearest one.", "",
+           f"background = {hexa(bg)}"]
+    for key, role in THEME_ROLES:
+        fg, b = palette[role]
+        out.append(f"{key} = {hexa(fg)}" + ("" if b == bg else f" on {hexa(b)}"))
+    return "\n".join(out) + "\n"
+
+
+def parse_theme(text):
+    """A theme file's palette (NERV's colours where it says nothing) and the problems in it."""
+    base = THEMES[DEFAULT_THEME]
+    roles = dict(THEME_ROLES)
+    entries, problems, background = {}, [], None
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith(("#", "//")):
+            continue
+        key, sep, value = line.partition("=")
+        key = key.strip().lower()
+        try:
+            if not sep:
+                raise ValueError("expected  name = colour")
+            if key == "background":
+                background = parse_colour(value)
+                continue
+            if key not in roles:
+                raise ValueError(f"unknown name “{key}”")
+            colours = re.split(r"\s+on\s+", value.strip(), maxsplit=1)  # "text on background"
+            entries[roles[key]] = (parse_colour(colours[0]), parse_colour(colours[1]) if len(colours) > 1 else None)
+        except ValueError as e:
+            problems.append(f"line {n}: {e}")
+    palette = {}
+    for role, (fg, bg) in base.items():
+        if background is not None and bg == base["text"][1]:
+            bg = background
+        if role in entries:
+            fg, bg = entries[role][0], entries[role][1] if entries[role][1] is not None else bg
+        palette[role] = (fg, bg)
+    return palette, problems
+
+
+def theme_path(name):
+    return os.path.join(THEMES_DIR, name + ".txt")
+
+
+def theme_names():
+    """The built-in themes, then yours (the .txt files in THEMES_DIR)."""
+    try:
+        mine = sorted(f[:-4] for f in os.listdir(THEMES_DIR) if f.endswith(".txt") and not f.startswith("."))
+    except OSError:
+        mine = []
+    return list(THEMES) + [m for m in mine if m not in THEMES]
+
+
+def load_theme(name):
+    """(palette, problems) for a theme; NERV if it can't be read."""
+    if name in THEMES:
+        return THEMES[name], []
+    try:
+        with open(theme_path(name), encoding="utf-8") as f:
+            return parse_theme(f.read())
+    except OSError:
+        return THEMES[DEFAULT_THEME], [f"theme “{name}” not found, using {DEFAULT_THEME}"]
+
+
+def load_settings():
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            settings = json.load(f)
+        return settings if isinstance(settings, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_setting(key, value):
+    settings = load_settings()
+    settings[key] = value
+    os.makedirs(NOTES_DIR, exist_ok=True)
+    tmp = os.path.join(NOTES_DIR, ".settings.json.saving~")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2)
+    os.replace(tmp, SETTINGS_FILE)
+
+
 # --- Legal highlighting ------------------------------------------------------
 
 # Capitalised words that start sentences rather than case names.
@@ -178,8 +336,14 @@ CASE_RE = re.compile(rf"\b{_STOP}(?:{_NAME}\s+v\.?\s+{_NAME}|Re\s+{_NAME})")
 CITE_RE = re.compile(
     r"[\[(]\d{4}[\])](?:\s+\d+)?\s+[A-Z][A-Za-z]*(?:\s+[A-Z][A-Za-z]*)?\s+\d+(?:\s+\([A-Za-z]+\))?"
 )
+# A provision number: 2, 2A, 1.1, 2(1)(a), 1 (1); then more joined by and / or / to / , / –,
+# e.g. "Articles 49 and 50", "Art. 21 (1) and (2)"; then the treaty, e.g. "Art. 3 (5) TEU".
+_TREATY = r"(?:TFEU|TEU)"
+_NUM = r"\d+[A-Z]*(?:\.\d+)*(?:\(\w+\)|\s\([0-9A-Za-z]{1,4}\))*"
+_MORE = rf"(?:(?:\s*[,\u2013-]\s*|\s+(?:and|or|to)\s+)(?:{_NUM}|\([0-9A-Za-z]{{1,4}}\)))*"
 STATUTE_RE = re.compile(
-    r"\b(?:ss?|arts?|regs?|sch|para|[Ss]ection|[Aa]rticle)\.?\s?\d+[A-Z]*(?:\(\w+\))*"
+    rf"\b(?:ss?|[Aa]rts?|regs?|sch|para|[Ss]ections?|[Aa]rticles?)\.?\s?{_NUM}{_MORE}(?:\s+{_TREATY}\b)?"
+    rf"|\b{_TREATY}\b"
     rf"|\b{_STOP}(?:[A-Z][a-z]+\s+)+(?:\([A-Za-z ]+\)\s+)?Act\s+\d{{4}}"
 )
 # Party labels in problem answers: D (defendant), V (victim), C (claimant), also D1, D's.
@@ -236,7 +400,8 @@ class Buffer:
         self.dirty_since = None   # when the first unsaved change was made
         self.disk_mtime = None    # file's mtime when we last read or wrote it
         self.note = None          # message to show after opening (e.g. encoding)
-        self.undo_stack, self.redo_stack = [], []
+        self.undo_stack, self.redo_stack = [], []  # (lines, cy, cx, selection anchor)
+        self.sel_anchor = None  # the editing pane's selection anchor, kept with each undo step
         self._last_kind, self._last_time = None, 0.0
         self._after = None  # cursor position after the last edit: moving away starts a new undo step
         self.version = 0    # bumped on every change, so derived values (word count) can be cached
@@ -306,7 +471,7 @@ class Buffer:
         merge = (kind in ("type", "delete") and kind == self._last_kind and now - self._last_time < 2
                  and not boundary and (self.cy, self.cx) == self._after)
         if not merge:
-            self.undo_stack.append((self.lines[:], self.cy, self.cx))
+            self.undo_stack.append((self.lines[:], self.cy, self.cx, self.sel_anchor))
             del self.undo_stack[:-300]
             self.redo_stack.clear()
         self._last_kind, self._last_time = kind, now
@@ -315,16 +480,29 @@ class Buffer:
         self.dirty, self.changed_at = True, now
         self.version += 1
 
+    def remember_selection(self, cy, cx, anchor):
+        """A selection was cleared without an edit: make that an undo step, so ^Z brings it back."""
+        self.undo_stack.append((self.lines[:], cy, cx, anchor))
+        del self.undo_stack[:-300]
+        self._last_kind = None
+
+    def touch(self):
+        """The text changed without a new undo step (e.g. trying the next spelling suggestion)."""
+        now = time.time()
+        if not self.dirty:
+            self.dirty_since = now
+        self.dirty, self.changed_at = True, now
+        self.version += 1
+
     def _swap(self, src, dst):
         if not src:
             return False
-        dst.append((self.lines[:], self.cy, self.cx))
-        self.lines, self.cy, self.cx = src.pop()
-        self.version += 1
+        dst.append((self.lines[:], self.cy, self.cx, self.sel_anchor))
+        lines, self.cy, self.cx, self.sel_anchor = src.pop()
+        changed, self.lines = lines != self.lines, lines
         self._last_kind = None
-        if not self.dirty:
-            self.dirty_since = time.time()
-        self.dirty, self.changed_at = True, time.time()
+        if changed:  # not when only a selection comes back
+            self.touch()
         return True
 
     def word_count(self):
@@ -575,6 +753,7 @@ class Speller:
         self.lang = lang
         self.proc = None
         self.cache, self.waiting, self.replies = {}, {}, {}
+        self.guesses, self.guessing = {}, {}  # word -> suggestions; request id -> word
         self.in_flight = set()
         self.next_id, self.last_send = 0, 0.0
         self.partial = b""
@@ -609,7 +788,7 @@ class Speller:
     def busy(self):
         """True while replies are due soon, so the editor should check back quickly."""
         return self.state in ("starting", "compiling") or (
-            bool(self.waiting) and time.time() - self.last_send < 3)
+            bool(self.waiting or self.guessing) and time.time() - self.last_send < 3)
 
     def _send(self, op, text):
         if self.state != "ready":
@@ -667,11 +846,24 @@ class Speller:
                 self.in_flight.discard(line)
                 self.cache[line] = tuple((a, n) for a, n in msg.get("bad", []))
                 got = True
+            elif rid in self.guessing:
+                self.guesses[self.guessing.pop(rid)] = (msg.get("words") or [])[:10]
+                got = True
             else:
                 self.replies[rid] = msg
         if len(self.cache) > 20000:
             self.cache.clear()
         return got
+
+    def suggestions(self, word):
+        """Suggested spellings for a word, or None until the helper has replied (never blocks)."""
+        if word in self.guesses:
+            return self.guesses[word]
+        if self.state == "ready" and word not in self.guessing.values():
+            rid = self._send("suggest", word)
+            if rid:
+                self.guessing[rid] = word
+        return None
 
     def wait_for(self, lines, timeout=2.0):
         """Check several lines and wait (briefly) until all have results."""
@@ -1151,7 +1343,7 @@ HELP = [
     ("Shift+Enter", "New line under the same bullet, without a new bullet. Option+Enter does the same."),
     ("Tab", "Indent a bullet (Shift+Tab to outdent). With lines selected, Tab / Shift+Tab indent / outdent all of them."),
     ("^T", "Insert a template: case brief, problem question (IRAC), statute, essay plan, lecture notes."),
-    ("^W", "Spelling: suggestions for the highlighted word, add it to your dictionary, or ignore it."),
+    ("^W", "Spelling: on a misspelt word the status bar shows the correction; ^W makes it, ^W again tries the next suggestion, then the full list (add to your dictionary, ignore). Away from one, ^W goes to the next mistake."),
     ("#", "Searching"),
     ("^P", "Search all notes: every line that mentions what you type, in every note. Enter jumps there."),
     ("^B", "Case index: every case cited in any note, with its citation and the notes that mention it."),
@@ -1167,6 +1359,7 @@ HELP = [
     ("Shift+arrows", "Select text (Shift+Option+arrows selects by word). Click with the mouse to place the cursor, drag to select."),
     ("Double-click", "Selects a word, or a whole case name, citation or statute. Triple-click selects the line."),
     ("Scroll", "The mouse wheel moves the view only; the cursor stays where it was, and typing carries on there."),
+    ("Right-click", "A menu: fixes for a misspelt word, cut / copy / paste, highlight, italic, bold, undo, split panes, export, themes."),
     ("//", "A comment to yourself: everything after // on a line is highlighted, and left out when you export."),
     ("CL  EL  LCh", "Abbreviations expand as you type: CL → Common Law, EL → Equity Law, LCh → Lord Chancellor. Add your own with  lawnotes --abbreviations  (one  SHORT = Long form  per line). ^Z undoes an expansion."),
     ("Tables", "Copy a table in Word and paste it (⌘V or ^V): it becomes a Markdown table with lined-up columns, and exports back to Word as a real table."),
@@ -1177,7 +1370,7 @@ HELP = [
     ("#", "Editing"),
     ("^K", "Cut the line (press repeatedly to cut several lines)."),
     ("^U", "Paste the cut lines above the cursor."),
-    ("^Z  ^Y", "Undo / redo."),
+    ("^Z  ^Y", "Undo / redo. Undo also brings back a selection you clicked or moved away from."),
     ("Option+E", "Export the note to Word (.docx) or PDF, into Downloads. Case names are put in italics (OSCOLA), [^1] footnotes become real footnotes. F5 does the same."),
     ("^R", "Version history: snapshots of your notes are taken automatically every few minutes while you work. Pick one to restore it (^Z undoes the restore)."),
     ("#", "Formatting (Markdown)"),
@@ -1185,6 +1378,7 @@ HELP = [
     ("- item", "Bullet;  1. item  numbered;  - [ ] item  to-do;  > text  quote."),
     ("**bold**", "Bold;  *italic*  italic."),
     ("#", "Colours"),
+    ("Option+T", "Themes: pick NERV (dark red), Unit-01 (purple and green), Paper (light), or one of yours. New theme copies the current one into a file you can change: save it and Law Notes updates straight away. F6 does the same."),
     ("", "Case names gold, citations like [1932] AC 562 pink, statutes like s 2(1) or Human Rights Act 1998 green, misspelt words highlighted in red."),
     ("D  V  C", "Party labels in problem answers: D (defendant) orange, V (victim) pink, C (claimant) blue; also D1, D2, D's."),
     ("", "If Law Notes ever closes or crashes unexpectedly, the reason is logged in iCloud Drive → Law Notes Logs."),
@@ -1251,45 +1445,44 @@ class App:
         self.hold_selection = False       # a double/triple click's release mustn't collapse it
         self.row_map = []       # screen row -> (line, start, end, last segment) for mouse clicks
         self.mouse_event = None  # a mouse report curses half-decoded as KEY_MOUSE (see get_key)
+        self.spell_cycle = None  # after ^W fixed a word: the word, its suggestions and which one is in
+        self.queued = []  # keys a menu chose, handled as if typed
         self.history = History()
         self.abbreviations = load_abbreviations()
         self.speller = Speller(SPELL_LANG) if SPELL_ON and sys.platform == "darwin" else None
         curses.raw()  # deliver ^S ^Q ^Z ^C to us instead of the terminal
         scr.timeout(1000)
-        self.init_colors()
+        self.theme = load_settings().get("theme") or DEFAULT_THEME
+        problems = self.init_colors()
+        if problems:
+            self.say(f"Theme “{self.theme}”: {problems[0]}", 10)
 
     def init_colors(self):
-        """NERV theme: blood-red background, warning-orange headings, Unit-01 green and purple."""
+        """Colours from the chosen theme (NERV unless you picked another); returns the problems
+        found in a theme file of yours."""
         italic = getattr(curses, "A_ITALIC", 0)
         colors = curses.has_colors()
-        if colors:
+        if colors and not getattr(self, "colors_started", False):
             curses.start_color()
+            self.colors_started = True
         rich = colors and curses.COLORS >= 256
         C = curses
-        # (256-colour, 8-colour fallback) for each role
-        palette = {
-            "text":    ((224, 52), (C.COLOR_WHITE, C.COLOR_RED)),
-            "h1":      ((208, 52), (C.COLOR_YELLOW, C.COLOR_RED)),
-            "h":       ((214, 52), (C.COLOR_YELLOW, C.COLOR_RED)),
-            "case":    ((220, 52), (C.COLOR_YELLOW, C.COLOR_RED)),
-            "cite":    ((217, 52), (C.COLOR_WHITE, C.COLOR_RED)),
-            "statute": ((119, 52), (C.COLOR_GREEN, C.COLOR_RED)),
-            "bullet":  ((141, 52), (C.COLOR_MAGENTA, C.COLOR_RED)),
-            "quote":   ((181, 52), (C.COLOR_WHITE, C.COLOR_RED)),
-            "match":   ((16, 208), (C.COLOR_BLACK, C.COLOR_YELLOW)),
-            "bar":     ((230, 88), (C.COLOR_WHITE, C.COLOR_BLACK)),
-            "key":     ((16, 208), (C.COLOR_BLACK, C.COLOR_YELLOW)),
-            "dim":     ((174, 52), (C.COLOR_WHITE, C.COLOR_RED)),
-            "sel":     ((16, 208), (C.COLOR_BLACK, C.COLOR_YELLOW)),
-            "spell":   ((231, 160), (C.COLOR_WHITE, C.COLOR_MAGENTA)),
-            "party_D": ((16, 214), (C.COLOR_BLACK, C.COLOR_YELLOW)),
-            "party_V": ((16, 218), (C.COLOR_BLACK, C.COLOR_MAGENTA)),
-            "party_C": ((16, 117), (C.COLOR_BLACK, C.COLOR_CYAN)),
-            "copied":  ((16, 120), (C.COLOR_BLACK, C.COLOR_GREEN)),
-            "bar_off": ((181, 88), (C.COLOR_WHITE, C.COLOR_BLACK)),
-            "comment": ((16, 229), (C.COLOR_BLACK, C.COLOR_YELLOW)),
-            "mark":    ((16, 226), (C.COLOR_BLACK, C.COLOR_YELLOW)),
+        theme, problems = load_theme(self.theme)
+        # 8-colour terminals ignore themes and get these
+        basic = {
+            "text": (C.COLOR_WHITE, C.COLOR_RED), "h1": (C.COLOR_YELLOW, C.COLOR_RED),
+            "h": (C.COLOR_YELLOW, C.COLOR_RED), "case": (C.COLOR_YELLOW, C.COLOR_RED),
+            "cite": (C.COLOR_WHITE, C.COLOR_RED), "statute": (C.COLOR_GREEN, C.COLOR_RED),
+            "bullet": (C.COLOR_MAGENTA, C.COLOR_RED), "quote": (C.COLOR_WHITE, C.COLOR_RED),
+            "match": (C.COLOR_BLACK, C.COLOR_YELLOW), "bar": (C.COLOR_WHITE, C.COLOR_BLACK),
+            "key": (C.COLOR_BLACK, C.COLOR_YELLOW), "dim": (C.COLOR_WHITE, C.COLOR_RED),
+            "sel": (C.COLOR_BLACK, C.COLOR_YELLOW), "spell": (C.COLOR_WHITE, C.COLOR_MAGENTA),
+            "party_D": (C.COLOR_BLACK, C.COLOR_YELLOW), "party_V": (C.COLOR_BLACK, C.COLOR_MAGENTA),
+            "party_C": (C.COLOR_BLACK, C.COLOR_CYAN), "copied": (C.COLOR_BLACK, C.COLOR_GREEN),
+            "bar_off": (C.COLOR_WHITE, C.COLOR_BLACK), "comment": (C.COLOR_BLACK, C.COLOR_YELLOW),
+            "mark": (C.COLOR_BLACK, C.COLOR_YELLOW),
         }
+        palette = {role: (theme[role], c8) for role, c8 in basic.items()}
         pairs = {}
         for n, (role, (c256, c8)) in enumerate(palette.items(), start=1):
             if colors:
@@ -1325,6 +1518,60 @@ class App:
             "mark": pairs["mark"] | curses.A_BOLD,
         }
         self.italic = italic
+        return problems
+
+    def apply_theme(self, name):
+        """Switch to a theme straight away; say what's wrong with it, if anything."""
+        self.theme = name
+        problems = self.init_colors()
+        self.scr.clear()  # repaint everything in the new colours
+        if problems:
+            self.say(f"Theme “{name}”: {problems[0]}" + (f" (and {len(problems) - 1} more)" if len(problems) > 1 else ""), 10)
+        return not problems
+
+    def choose_theme(self):
+        """Option+T: pick a theme, make a new one (a copy of the current one) or edit yours."""
+        def build(query):
+            items = [(f"{'●' if name == self.theme else ' '} {name}   {'built in' if name in THEMES else 'yours'}",
+                      ("use", name)) for name in theme_names()]
+            items.append((f"+ New theme: a copy of “{self.theme}” to change", ("new", None)))
+            if self.theme not in THEMES:
+                items.append((f"  Edit “{self.theme}”", ("edit", self.theme)))
+            return [it for it in items if query.lower() in it[0].lower()]
+        choice = self.pick("Themes", build, guide="Enter switches theme. Yours are in UCL Notes → .themes, so every Mac has them.")
+        if not choice:
+            return
+        action, name = choice
+        if action == "new":
+            name = self.prompt("Name for the new theme: ")
+            name = (name or "").strip()
+            if not name:
+                return
+            if not re.fullmatch(r"[\w][\w '\u2019-]{0,39}", name) or name.lower() in (t.lower() for t in theme_names()):
+                self.say(f"“{name}” can't be used: pick a new name (letters, numbers, spaces, - and ')", 8)
+                return
+            try:
+                os.makedirs(THEMES_DIR, exist_ok=True)
+                with open(theme_path(name), "x", encoding="utf-8") as f:
+                    f.write(theme_text(name, load_theme(self.theme)[0]))
+            except OSError as e:
+                self.say(f"Couldn't create the theme: {e.strerror or e}", 8)
+                return
+            action = "edit"
+        if action == "edit":
+            self.use_theme(name)
+            if self.open(theme_path(name)):
+                self.say("Change a colour and save (^S): Law Notes updates straight away. ^O goes back to your notes.", 12)
+            return
+        self.use_theme(name)
+        self.say(f"Theme: {name}")
+
+    def use_theme(self, name):
+        self.apply_theme(name)
+        try:
+            save_setting("theme", name)
+        except OSError as e:
+            self.say(f"Couldn't remember the theme: {e.strerror or e}", 8)
 
     def log_once(self, event):
         seen = self.__dict__.setdefault("_logged", set())
@@ -1420,9 +1667,14 @@ class App:
             return False
         if os.path.realpath(b.path) == os.path.realpath(ABBREV_FILE):
             self.abbreviations = load_abbreviations()
+        theme_ok = None
+        if os.path.realpath(b.path) == os.path.realpath(theme_path(self.theme)):
+            theme_ok = self.apply_theme(self.theme)  # the theme in use: show the change now
         if note:
             self.say(note, 12)
-        elif self.save_failed or announce:
+        elif theme_ok:
+            self.say(f"Theme “{self.theme}” updated ✓")
+        elif theme_ok is None and (self.save_failed or announce):
             self.say("Saved ✓")
         self.save_failed = False
         if time.time() - self.history.last >= SNAPSHOT_EVERY:
@@ -1759,7 +2011,6 @@ class App:
         ck, _ = self.seg_of(b.cy, b.cx)
         q = self.search.lower()
         cursor = None
-        on_typo = False
         sel = self.selection()
         self.row_map = []
         y, i, s = 0, self.top, self.top_seg
@@ -1774,8 +2025,6 @@ class App:
                     if i == b.cy and e == b.cx:
                         continue  # still typing this word
                     attrs[a:e] = [self.A["spell"]] * (e - a)
-                    if i == b.cy and a <= b.cx < e:
-                        on_typo = True
             flash = self.flash[:2] if self.flash and time.time() < self.flash[2] else None
             for span, look in ((sel, "sel"), (flash, "copied")):
                 if span and span[0][0] <= i <= span[1][0]:
@@ -1814,8 +2063,8 @@ class App:
         left = f" {name}  {'● unsaved' if b.dirty else '✓ saved'}"
         if active and time.time() < self.msg_until:
             left += f"   {self.msg}"
-        elif active and on_typo:
-            left += "   ^W fix spelling"
+        elif active and self.spell_hint():
+            left += "   " + self.spell_hint()
         elif active and self.speller and self.speller.state == "compiling":
             left += "   preparing spell check…"
         right = f"Ln {b.cy + 1}/{len(b.lines)}   {words:,} words "
@@ -1864,7 +2113,7 @@ class App:
             first = self.get_key()
             if first in ("\r", "\n"):
                 return ("key", "shift-enter")  # Option+Enter on terminals using Option as Meta
-            if first in ("b", "f", "e", "d", "D", "w", "o", "h", "\x7f", "\x08"):
+            if first in ("b", "f", "e", "d", "D", "w", "o", "h", "t", "\x7f", "\x08"):
                 return ("alt", first)
             if isinstance(first, int):  # Esc + an arrow curses already decoded: Option+arrow
                 return ("key", OPTION_ARROWS.get(first))
@@ -2038,7 +2287,52 @@ class App:
             out.append((a, e))
         return out
 
+    def typo_at_cursor(self):
+        """(start, end) of the misspelt word under the cursor, or else the nearest one before it on
+        the line; not the word still being typed. None if there's none (or not checked yet)."""
+        b, found = self.buf, None
+        for a, e in self.misspelt(b.lines[b.cy]):
+            if a <= b.cx and e != b.cx:
+                found = (a, e)
+        return found
+
+    def cycling(self):
+        """The ^W cycle still applies: the fixed word is untouched and the cursor right after it."""
+        c, b = self.spell_cycle, self.buf
+        return c if c and c["buf"] is b and c["version"] == b.version and (b.cy, b.cx) == (
+            c["line"], c["a"] + len(c["now"])) else None
+
+    def spell_hint(self):
+        """The status bar's spelling preview: the correction ^W would make."""
+        sp = self.speller
+        if not sp or sp.state != "ready":
+            return None
+        c = self.cycling()
+        if c:
+            n, guesses = c["n"], c["guesses"]
+            nxt = f"^W next: {guesses[n + 1]}" if n + 1 < min(len(guesses), SPELL_CYCLE) else "^W more options"
+            return f"✓ {c['word']} → {c['now']}   {nxt} · ^Z undo"
+        t = self.typo_at_cursor()
+        if not t:
+            return None
+        word = self.buf.lines[self.buf.cy][t[0]:t[1]]
+        guesses = sp.suggestions(word)
+        if guesses is None:
+            return f"“{word}”  ^W spelling"
+        if not guesses:
+            return f"“{word}”: no suggestions  ^W add to dictionary"
+        return f"{word} → {guesses[0]}   ^W to fix"
+
+    def set_word(self, c, word):
+        b = self.buf
+        line = b.lines[c["line"]]
+        b.lines[c["line"]] = line[:c["a"]] + word + line[c["a"] + len(c["now"]):]
+        b.cy, b.cx = c["line"], c["a"] + len(word)
+        c["now"] = word
+
     def fix_spelling(self):
+        """^W: fix the misspelt word at the cursor with the suggestion the status bar shows; ^W
+        again tries the next one, then the full list. Not on a mistake: go to the next one."""
         sp = self.speller
         if not sp or sp.state == "off":
             self.say("Spell check isn't available on this computer")
@@ -2047,24 +2341,59 @@ class App:
             self.say("Spell check is still starting — try again in a moment")
             return
         b = self.buf
+        c = self.cycling()
+        if c:
+            c["n"] += 1
+            if c["n"] < min(len(c["guesses"]), SPELL_CYCLE):
+                self.set_word(c, c["guesses"][c["n"]])
+                b.touch()
+                c["version"] = b.version
+                return
+            self.set_word(c, c["word"])  # none of those: back to what you typed, and the full list
+            b.touch()
+            self.spell_cycle = None
+            self.spelling_menu(c["line"], c["a"], c["word"], c["guesses"])
+            return
+        self.spell_cycle = None
+        sp.wait_for([b.lines[b.cy]])
+        t = self.typo_at_cursor()
+        if not t:
+            self.next_typo()
+            return
+        a, e = t
+        word = b.lines[b.cy][a:e]
+        guesses = sp.suggestions(word)
+        if guesses is None:
+            guesses = sp.guesses[word] = ((sp.call("suggest", word) or {}).get("words") or [])[:10]
+        if not guesses:
+            self.spelling_menu(b.cy, a, word, [])
+            return
+        b.checkpoint("spell")
+        c = {"buf": b, "line": b.cy, "a": a, "word": word, "now": word, "guesses": guesses, "n": 0}
+        self.set_word(c, guesses[0])
+        c["version"] = b.version
+        self.spell_cycle = c
+
+    def next_typo(self):
+        """Move to the next misspelt word (wrapping round): the status bar then shows its fix."""
+        b, sp = self.buf, self.speller
         sp.wait_for(b.lines)
-        n, target = len(b.lines), None
-        for step in range(n + 1):  # from the cursor onwards, wrapping round
+        n = len(b.lines)
+        for step in range(n + 1):
             i = (b.cy + step) % n
             for a, e in self.misspelt(b.lines[i]):
-                if (step == 0 and e < b.cx) or (step == n and a >= b.cx):
+                if (step == 0 and a <= b.cx) or (step == n and a > b.cx):
                     continue
-                target = (i, a, e)
-                break
-            if target:
-                break
-        if not target:
-            self.say("No spelling mistakes found ✓")
-            return
-        i, a, e = target
-        b.cy, b.cx = i, e
-        word, line = b.lines[i][a:e], b.lines[i]
-        guesses = ((sp.call("suggest", word) or {}).get("words") or [])[:10]
+                b.cy, b.cx = i, a
+                sp.suggestions(b.lines[i][a:e])
+                return
+        self.say("No spelling mistakes found ✓")
+
+    def spelling_menu(self, i, a, word, guesses):
+        """Every suggestion, add to your dictionary, ignore, or type the right spelling."""
+        sp, b = self.speller, self.buf
+        line = b.lines[i]
+        e = a + len(word)
         items = [(g, ("replace", g)) for g in guesses]
         items += [(f"+ Add “{word}” to my dictionary", ("learn", word)),
                   (f"  Ignore “{word}” in this session", ("ignore", word))]
@@ -2081,7 +2410,7 @@ class App:
         if action == "replace":
             b.checkpoint("spell")
             b.lines[i] = line[:a] + value + line[e:]
-            b.cx = a + len(value)
+            b.cy, b.cx = i, a + len(value)
         elif action == "learn":
             sp.call("learn", word)
             sp.cache.clear()
@@ -2517,7 +2846,15 @@ class App:
         if button & 64:  # wheel (64 up, 65 down): move the view only, the cursor stays put
             self.scroll_view(3 if button & 1 else -3)
             return self.anchor is not None
-        if button & 3:  # middle or right button: ignore
+        if button & 3 == 2 and pressed and not button & 32:  # right-click: the context menu
+            pos = self.screen_to_buf(y, x)
+            sel = self.selection()
+            if pos and not (sel and sel[0] <= pos <= sel[1]):
+                self.anchor = None  # outside the selection: the menu is about what's under the mouse
+                b.cy, b.cx = pos
+            self.context_menu(y + pane.rect[0], x)
+            return self.anchor is not None
+        if button & 3:  # middle button, and the right button's release: ignore
             return self.anchor is not None
         pos = self.screen_to_buf(y, x)
         if pos is None:
@@ -2549,6 +2886,103 @@ class App:
             return True
         b.cy, b.cx = pos  # released
         return self.anchor is not None and self.anchor != pos
+
+    def context_menu(self, sy, sx):
+        """Right-click: a small menu at the mouse. On a misspelt word, its fixes come first."""
+        b, sel = self.buf, self.selection()
+        items = []  # (label, shortcut, action), or None for a line
+        typo = next(((a, e) for a, e in self.misspelt(b.lines[b.cy]) if a <= b.cx < e), None)
+        if typo and not sel:
+            word = b.lines[b.cy][typo[0]:typo[1]]
+            guesses = self.speller.suggestions(word)
+            if guesses is None:
+                guesses = self.speller.guesses[word] = ((self.speller.call("suggest", word) or {}).get("words") or [])[:10]
+            items += [(g, "", ("spell", typo, g)) for g in guesses[:5]]
+            items += [(f"Add “{word}” to dictionary", "", ("learn", word)),
+                      (f"Ignore “{word}”", "", ("ignore", word)), None]
+        if sel:
+            items += [("Cut", "^X", ["\x18"]), ("Copy", "^C", ["\x03"]), ("Paste", "^V", ["\x16"]), None,
+                      ("Highlight", "=", ["="]), ("Italic", "*", ["*"]), ("Bold", "**", ["*", "*"])]
+        else:
+            items += [("Paste", "^V", ["\x16"]), ("Select word", "double-click", ("select-word",)),
+                      ("Highlight word", "Option+H", ["highlight"])]
+        items += [None, ("Undo", "^Z", ["\x1a"]), ("Redo", "^Y", ["\x19"]), None,
+                  ("Split side by side", "Option+D", ["split-right"]),
+                  ("Split one above the other", "Option+Shift+D", ["split-down"])]
+        if len(list(self.panes())) > 1:
+            items += [("Next pane", "Option+O", ["next-pane"]), ("Close this pane", "Option+W", ["close-pane"])]
+        items += [None, ("Export…", "Option+E", ["export"]), ("Themes…", "Option+T", ["themes"])]
+        choices = [i for i, it in enumerate(items) if it]
+        width = max(len(it[0]) + len(it[1]) for it in items if it) + 5
+        H, W = self.scr.getmaxyx()
+        top = sy + 1 if sy + 1 + len(items) + 2 <= H - 1 else max(0, sy - len(items) - 2)
+        left = max(0, min(sx, W - width - 3))
+        at = 0
+        while True:
+            self.draw()
+            box = self.A["bar"]
+            self.put(top, left, "┌" + "─" * width + "┐", box)
+            for r, it in enumerate(items):
+                if it is None:
+                    self.put(top + 1 + r, left, "├" + "─" * width + "┤", box)
+                    continue
+                look = self.A["key"] if r == choices[at] else box
+                self.put(top + 1 + r, left, "│", box)
+                self.put(top + 1 + r, left + 1, f" {it[0]}".ljust(width - len(it[1]) - 1) + it[1] + " ", look)
+                self.put(top + 1 + r, left + width + 1, "│", box)
+            self.put(top + len(items) + 1, left, "└" + "─" * width + "┘", box)
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+            self.scr.refresh()
+            key = self.get_key()
+            if key is None or key == curses.KEY_RESIZE:
+                continue
+            key = self.normalise(key)
+            if key in ("esc", "\x03", "\x07", "\x11"):
+                return
+            if key == curses.KEY_UP:
+                at = (at - 1) % len(choices)
+            elif key == curses.KEY_DOWN:
+                at = (at + 1) % len(choices)
+            elif key in ENTER:
+                break
+            elif isinstance(key, tuple) and key[0] == "mouse":
+                button, x, y, pressed = key[1]
+                r = y - top - 1
+                inside = left < x <= left + width and 0 <= r < len(items) and items[r]
+                if button & 64:
+                    continue
+                if button & 32:  # moving with a button held: follow it
+                    if inside:
+                        at = choices.index(r)
+                    continue
+                if inside and (pressed or button & 3 == 2):  # a click, or letting go of the right button
+                    at = choices.index(r)
+                    if pressed or (y, x) != (sy, sx):
+                        break
+                elif pressed:
+                    return  # clicked outside: close
+        action = items[choices[at]][2]
+        if isinstance(action, list):
+            self.queued += action  # done as if typed, once this click is finished
+        elif action[0] == "spell":
+            (a, e), word = action[1], action[2]
+            b.checkpoint("spell")
+            b.lines[b.cy] = b.lines[b.cy][:a] + word + b.lines[b.cy][e:]
+            b.cx = a + len(word)
+        elif action[0] == "learn":
+            self.speller.call("learn", action[1])
+            self.speller.cache.clear()
+            self.say(f"Added “{action[1]}” to your Mac's dictionary")
+        elif action[0] == "ignore":
+            self.ignored.add(action[1].lower())
+        elif action[0] == "select-word":
+            span = self.word_at(b.cy, b.cx)
+            if span:
+                self.anchor = (b.cy, span[0])
+                b.cx = span[1]
 
     def word_at(self, y, x):
         """What a double click selects: a case name, citation or statute if x is inside one,
@@ -2586,7 +3020,7 @@ class App:
                 return r
             if r[0] == "alt":
                 return {"b": "word-left", "f": "word-right", "e": "export", "d": "split-right",
-                        "D": "split-down", "w": "close-pane", "o": "next-pane", "h": "highlight",
+                        "D": "split-down", "w": "close-pane", "o": "next-pane", "h": "highlight", "t": "themes",
                         "\x7f": "delete-word-left", "\x08": "delete-word-left"}[r[1]]
             return r[1]  # a curses key, a name, or None for keys we don't use
         if key == curses.KEY_MOUSE:
@@ -2597,6 +3031,18 @@ class App:
         return key
 
     def handle(self, key):
+        b, pane, had = self.buf, self.pane, self.selection()
+        before = (b.version, b.cy, b.cx, self.anchor)
+        b.sel_anchor = self.anchor  # kept with any undo step this key makes
+        result = self._handle(key)
+        if (had and self.pane is pane and self.buf is b and b.version == before[0]
+                and not self.selection() and key not in ("\x1a", "\x19")):
+            b.remember_selection(*before[1:])  # clicked or moved away: ^Z brings the selection back
+        while self.queued and result != "quit":
+            result = self.handle(self.queued.pop(0))
+        return result
+
+    def _handle(self, key):
         key = self.normalise(key)
         if key is None:
             return
@@ -2719,6 +3165,8 @@ class App:
             self.next_pane()
         elif key in ("export", curses.KEY_F5):
             self.export()
+        elif key in ("themes", curses.KEY_F6):
+            self.choose_theme()
         elif key == "\x0c":
             self.outline()
         elif key == "\x0b":
@@ -2732,12 +3180,12 @@ class App:
             if self.clip:
                 b.cx = 0
                 b.insert("\n".join(self.clip) + "\n", kind="paste")
-        elif key == "\x1a":
-            if not b.undo():
-                self.say("Nothing to undo")
-        elif key == "\x19":
-            if not b.redo():
-                self.say("Nothing to redo")
+        elif key in ("\x1a", "\x19"):
+            if not (b.undo() if key == "\x1a" else b.redo()):
+                self.say("Nothing to undo" if key == "\x1a" else "Nothing to redo")
+            else:
+                self.anchor = b.sel_anchor  # the selection there was at that point, if any
+                keep_selection = self.anchor is not None
         elif key in ("\x01", curses.KEY_HOME):
             b.cx = 0
         elif key in ("\x05", curses.KEY_END):

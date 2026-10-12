@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.0
+
+- Themes (Option+T or F6): NERV (dark red), Unit-01 (purple and green) and Paper (light), or your own. New theme copies the current one into a file of colours (`#rrggbb`) in UCL Notes → .themes, so every Mac has it; save it and Law Notes updates straight away. Mistakes in a theme file are reported with their line.
+- Right-click opens a menu at the mouse: fixes for a misspelt word, cut / copy / paste, highlight, italic, bold, undo / redo, split panes, export and themes.
+- Spelling: on a misspelt word the status bar previews the correction (`recieve → receive`), and ^W makes it straight away; ^W again tries the next suggestion, then opens the full list (add to dictionary, ignore). Away from a mistake, ^W goes to the next one.
+- Undo brings back a selection: clicking or moving away from selected text is an undo step, and undoing an edit made to a selection selects it again.
+- Articles and EU treaties are highlighted like statutes: Article 1 (1), Article 1.1, Articles 49 and 50 TEU, Art. 21 (1) and (2) TEU, and TEU / TFEU on their own.
+
 ## 1.4.2
 
 - Clicks, drags and the scroll wheel in Ghostty were typed into the note as text like `64;45;41M`. Ghostty's terminal description says mouse reports start with `ESC [ <`, so curses took that much as a "mouse key" and passed the rest through as typing. Law Notes now reads the rest of the report itself. Tested with Ghostty's own terminal description and in a new test.

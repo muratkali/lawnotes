@@ -12,6 +12,8 @@
 - Highlight text (select it, press `=`): exported to Word as a yellow highlight.
 - Paste tables from Word: they become Markdown tables, and export back to Word as real tables.
 - Panes like herdr: Option+D splits side by side, Option+Shift+D stacks, Option+O switches, Option+W closes.
+- Themes (Option+T): NERV, Unit-01, Paper, or your own colours.
+- Right-click for a menu: spelling fixes, copy and paste, formatting, split panes.
 
 Press **^G** in the editor to see every shortcut.
 
