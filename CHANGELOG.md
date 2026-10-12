@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.2
+
+- One stray byte that isn't text (from a terminal set to another encoding, or a glitchy remote connection) made Law Notes silently swallow up to about 50 following keystrokes, until you paused for a second. Now only that byte is dropped: Law Notes reads and decodes the input itself.
+- Esc followed quickly by a control key (^Q, ^S…) lost the second key; it now works.
+- Tests: the random-input test could hang CI for 6 hours (the test waited for a killed editor without reading its output) and, after the stray byte, never saw its own ^Q. Found by an advisor review; both fixed, with new tests.
+
 ## 1.5.1
 
 - Splitting splits first: the note list opens inside the new pane, with your note still in view beside it (Esc keeps the same note in both).

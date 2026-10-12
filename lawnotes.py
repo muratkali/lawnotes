@@ -55,7 +55,7 @@ import traceback
 import unicodedata
 from functools import lru_cache
 
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 HELP_TITLE = "Help — Law Notes (beta)"
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
 NOTES_DIR = os.path.abspath(os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes")))
@@ -1445,6 +1445,7 @@ class App:
         self.hold_selection = False       # a double/triple click's release mustn't collapse it
         self.row_map = []       # screen row -> (line, start, end, last segment) for mouse clicks
         self.mouse_event = None  # a mouse report curses half-decoded as KEY_MOUSE (see get_key)
+        self.partial = b""      # the first bytes of a character still arriving (see read_char)
         self.spell_cycle = None  # after ^W fixed a word: the word, its suggestions and which one is in
         self.queued = []  # keys a menu chose, handled as if typed
         self.history = History()
@@ -2079,11 +2080,40 @@ class App:
         return cursor if active else None
 
     # Input helpers
+    def read_char(self):
+        """One key: a character, a curses key code, or None when nothing arrived in time.
+        Bytes are read and decoded here because get_wch(), after one byte that isn't UTF-8,
+        swallows the next 50-odd keystrokes (or everything until a pause)."""
+        while True:
+            try:
+                c = self.scr.getch()
+            except curses.error:
+                return None
+            if c < 0:
+                return None
+            if c > 255:  # a key curses decoded (arrows, F-keys, mouse, resize)
+                self.partial = b""
+                return c
+            if 0x80 <= c <= 0xBF and self.partial:  # the next byte of a character
+                self.partial += bytes([c])
+                try:
+                    ch = self.partial.decode("utf-8")
+                except UnicodeDecodeError as e:
+                    if "unexpected end" in e.reason:
+                        continue  # more bytes to come
+                    self.partial = b""
+                    continue  # not UTF-8: dropped, and only that
+                self.partial = b""
+                return ch
+            self.partial = b""
+            if c < 0x80:
+                return chr(c)
+            if 0xC2 <= c <= 0xF4:  # the first byte of a character
+                self.partial = bytes([c])
+            # any other byte isn't UTF-8: dropped, and only that
+
     def get_key(self):
-        try:
-            key = self.scr.get_wch()
-        except curses.error:
-            return None
+        key = self.read_char()
         if key == curses.KEY_MOUSE:
             # Some terminals' terminfo (Ghostty's) says mouse reports start with ESC [ <, so curses
             # takes that much as KEY_MOUSE and leaves the rest ("0;12;5M"): read it here, or it
@@ -2097,10 +2127,7 @@ class App:
         seq = ""
         try:
             while len(seq) < 24:
-                try:
-                    ch = self.scr.get_wch()
-                except curses.error:
-                    break
+                ch = self.read_char()
                 if not isinstance(ch, str):
                     break
                 seq += ch
@@ -2127,6 +2154,8 @@ class App:
                     return ("key", OPTION_ARROWS[inner[1]])
                 return inner
             if first not in ("[", "O"):
+                if isinstance(first, str) and first < " ":
+                    curses.ungetch(ord(first))  # Esc then ^Q or ^S: its own key, not part of the Esc
                 return None
             seq = first
             while len(seq) < 24:

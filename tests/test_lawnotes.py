@@ -423,9 +423,10 @@ class Session:
         for _ in range(int(seconds * 10)):
             if os.waitpid(self.pid, os.WNOHANG)[0] == self.pid:
                 return True
-            time.sleep(0.1)
+            self.out += self.read(0.1)
         os.kill(self.pid, 9)
-        os.waitpid(self.pid, 0)
+        while os.waitpid(self.pid, os.WNOHANG)[0] != self.pid:
+            self.out += self.read(0.1)  # a killed editor can't finish exiting until its output is read
         return False
 
 
@@ -469,6 +470,30 @@ class SessionTests(unittest.TestCase):
         s.keys(b"\x01" + b"\x1b[1;2C" * 6 + b"Y\x1a" + b"Z\x13", 0.6)  # "X beta": typed over, ^Z selects it again
         self.assertTrue(s.quit())
         self.assertEqual(open(note).read().splitlines(), ["Z gamma"])
+
+    def test_stray_byte_loses_only_itself(self):
+        # get_wch() used to swallow the next ~50 keystrokes after a byte that isn't UTF-8
+        note = os.path.join(lawnotes.NOTES_DIR, "Stray.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("")
+        s = Session(note)
+        s.keys(b"\xc5The duty of care was owed by D to V.\xff Caf\xc3\xa9\x13", 0.8)
+        self.assertTrue(s.quit())
+        self.assertEqual(open(note).read(), "The duty of care was owed by D to V. Café\n")
+
+    def test_esc_then_quick_control_key(self):
+        # a control key right behind an Esc is its own key, not part of the Esc
+        note = os.path.join(lawnotes.NOTES_DIR, "EscQuit.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("text\n")
+        s = Session(note)
+        s.keys(b"\x1b\x11", 1.5)
+        for _ in range(20):
+            if os.waitpid(s.pid, os.WNOHANG)[0] == s.pid:
+                break
+            s.out += s.read(0.1)
+        else:
+            self.fail("Esc then ^Q in one write didn't quit")
 
     def test_right_click_menu(self):
         note = os.path.join(lawnotes.NOTES_DIR, "Menu.md")

@@ -82,7 +82,13 @@ class FuzzTests(unittest.TestCase):
         os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
         note = os.path.join(lawnotes.NOTES_DIR, "Fuzz.md")
         open(note, "w").write("# Fuzz\n\nDonoghue v Stevenson [1932] AC 562; s 2(1); D and V.\n")
-        s = Session(note, env=fake_clipboard())
+        env = fake_clipboard()
+        for tool in ("pandoc", "swiftc"):  # exports have their own tests; here they'd take minutes on CI
+            stand_in = os.path.join(env["PATH"].split(os.pathsep)[0], tool)
+            with open(stand_in, "w") as f:
+                f.write("#!/bin/sh\nexit 1\n")
+            os.chmod(stand_in, 0o755)
+        s = Session(note, env=env)
         for _ in range(400):
             if rng.random() < 0.4:
                 data = rng.choice(pieces)
