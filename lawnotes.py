@@ -55,7 +55,7 @@ import traceback
 import unicodedata
 from functools import lru_cache
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 HELP_TITLE = "Help — Law Notes (beta)"
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
 NOTES_DIR = os.path.abspath(os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes")))
@@ -1328,13 +1328,13 @@ HINTS = [("^G", "Help"), ("^S", "Save"), ("^O", "Open"), ("^P", "Search all"), (
 HELP = [
     ("", "Law Notes is in beta: it's tested and your notes are plain Markdown files, but expect rough edges. If it ever closes unexpectedly, the reason is in iCloud Drive → Law Notes Logs."),
     ("#", "Panes"),
-    ("Option+D", "Split side by side; Option+Shift+D splits one above the other. The new pane opens the note list (Esc keeps the same note)."),
+    ("Option+D", "Split side by side; Option+Shift+D splits one above the other. The new pane shows the note list: click a note or press Enter (Esc keeps the same note)."),
     ("Option+O", "Next pane. Clicking a pane also switches to it."),
     ("Option+W", "Close the pane (the note is saved first)."),
     ("Drag", "Drag the line between side-by-side panes to resize them; for stacked panes, drag the upper pane's status bar."),
     ("", "The same note in two panes stays in sync: both show your edits as you type."),
     ("#", "Notes and folders"),
-    ("^O", "Open a note. Type to filter the list, Enter to open."),
+    ("^O", "Open a note. Type to filter the list; click a note or press Enter to open it."),
     ("^N", "New note. Use Folder/Name to file it in a folder, e.g. Contract/Offer — the folder is created for you."),
     ("^S", "Save now. Notes also save by themselves a few seconds after you stop typing, and when you quit."),
     ("^Q", "Save and quit."),
@@ -1754,7 +1754,8 @@ class App:
         if now - b.changed_at >= AUTOSAVE_AFTER or now - (b.dirty_since or now) >= AUTOSAVE_MAX:
             self.safe_save()
 
-    def open_picker(self):
+    def open_picker(self, pane=None):
+        """The note list (inside a pane when given): open a note or make a new one."""
         notes = self.list_notes()
 
         def build(query):
@@ -1774,7 +1775,8 @@ class App:
         choice = self.pick(f"Notes in {notes_location()}", build,
                            "No notes yet. Type a name and press Enter.",
                            guide="New note or folder: type Folder/Name and press Enter, e.g. Contract/Offer "
-                                 "makes the Contract folder (Contract/Offer/Postal rule nests deeper).")
+                                 "makes the Contract folder (Contract/Offer/Postal rule nests deeper).",
+                           pane=pane)
         if choice is None:
             return False
         action, arg = choice
@@ -1923,8 +1925,8 @@ class App:
         new.cy, new.cx, new.anchor = self.pane.cy, self.pane.cx, None
         self.layout.replace(self.pane, Layout(kind, Layout.leaf(self.pane), Layout.leaf(new)))
         self.load_view(new)
-        self.draw()
-        if not self.open_picker():
+        self.draw()  # lays out the panes, so the new one has its place
+        if not self.open_picker(pane=self.pane):
             self.say("Both panes show this note; Option+W closes a pane", 5)
 
     def close_pane(self):
@@ -1953,7 +1955,7 @@ class App:
                 return pane
         return None
 
-    def draw(self):
+    def draw(self, refresh=True):
         scr = self.scr
         scr.erase()
         H, W = scr.getmaxyx()
@@ -1987,6 +1989,8 @@ class App:
             pass
         if cursor:
             scr.move(*cursor)
+        if not refresh:  # the caller draws more on top first
+            return
         sys.stdout.write("\x1b[?2026h")  # begin synchronised update (ignored where unsupported)
         sys.stdout.flush()
         scr.refresh()
@@ -2186,30 +2190,43 @@ class App:
             elif isinstance(k, str) and k.isprintable():
                 text += k
 
-    def pick(self, title, build, empty_hint="", guide=""):
-        """Full-screen filterable list. build(query) -> [(label, value)]. Returns value or None."""
-        query, sel, off = "", 0, 0
+    def pick(self, title, build, empty_hint="", guide="", pane=None):
+        """Filterable list, full screen or inside a pane (the other panes stay in view).
+        build(query) -> [(label, value)]. Click an item or press Enter. Returns value or None."""
+        query, sel, off, pressed_on = "", 0, 0, None
         while True:
             items = build(query)
             sel = max(0, min(sel, len(items) - 1))
-            H, W = self.scr.getmaxyx()
-            top = 4 if guide else 3  # first row of the list
+            if pane:
+                self.draw(refresh=False)  # the other panes, as they are
+                Y, X, H, W = pane.rect
+                for r in range(H):
+                    self.put(Y + r, X, " " * (W - (1 if X + W >= self.scr.getmaxyx()[1] else 0)), self.A["text"])
+            else:
+                Y, X = 0, 0
+                H, W = self.scr.getmaxyx()
+                self.scr.erase()
+            guide_rows = textwrap.wrap(guide, max(10, W - 2))[:4] if guide else []  # narrow panes: wrapped
+            top = 3 + len(guide_rows)  # first row of the list
             listh = max(1, H - top - 2)
             off = min(off, sel)
             off = max(off, sel - listh + 1)
-            self.scr.erase()
-            self.put(0, 1, title[:W - 2], self.A["h1"])
-            self.put(1, 1, ("Filter: " + query)[:W - 2])
-            if guide:
-                self.put(2, 1, guide[:W - 2], self.A["dim"])
+            self.put(Y, X + 1, title[:W - 2], self.A["h1"])
+            self.put(Y + 1, X + 1, ("Filter: " + query)[:W - 2])
+            for r, text in enumerate(guide_rows):
+                self.put(Y + 2 + r, X + 1, text[:W - 2], self.A["dim"])
             hint = empty_hint(query) if callable(empty_hint) else empty_hint
             if not items and hint:
-                self.put(top, 1, hint[:W - 2], self.A["dim"])
+                self.put(Y + top, X + 1, hint[:W - 2], self.A["dim"])
             for r, (label, _) in enumerate(items[off:off + listh]):
                 attr = self.A["sel"] if off + r == sel else self.A["text"]
-                self.put(top + r, 0, (" " + label)[:W - 1].ljust(W - 1), attr)
-            self.put(H - 1, 1, "type to filter · ↑↓ choose · Enter select · Esc cancel"[:W - 3], self.A["dim"])
-            self.scr.move(1, min(9 + len(query), W - 1))
+                self.put(Y + top + r, X, (" " + label)[:W - 1].ljust(W - 1), attr)
+            self.put(Y + H - 1, X + 1, "type to filter · click or Enter to open · Esc cancel"[:W - 3], self.A["dim"])
+            try:
+                curses.curs_set(1)
+            except curses.error:
+                pass
+            self.scr.move(Y + 1, X + min(9 + len(query), W - 1))
             self.scr.refresh()
 
             k = self.get_key()
@@ -2217,14 +2234,37 @@ class App:
                 continue
             if k in ENTER:
                 return items[sel][1] if items else None
+            event = None
+            if k == curses.KEY_MOUSE:
+                event, self.mouse_event = self.mouse_event, None
             if k == "\x1b":
                 r = self.read_escape()
                 if r is None:
                     return None
                 if r[0] == "paste":
                     query, sel = query + clean_text(r[1]).split("\n")[0], 0
+                if r[0] == "mouse":
+                    event = r[1]
                 if r[0] == "key" and isinstance(r[1], int):
                     k = r[1]  # arrows the terminal sent as ESC [ A etc.
+            if event:
+                button, x, y, down = event
+                row = off + y - Y - top if Y + top <= y < Y + top + listh and X <= x < X + W else None
+                if button & 64:  # wheel
+                    sel += 3 if button & 1 else -3
+                elif button & (3 | 32):
+                    pass
+                elif down:  # opens on release, so the release doesn't land in the note
+                    pressed_on = row if row is not None and row < len(items) else None
+                    if pressed_on is not None:
+                        sel = pressed_on
+                    elif pane and not (Y <= y < Y + H and X <= x < X + W):
+                        return None  # clicked another pane: keep this one as it is
+                elif pressed_on is not None and row == pressed_on:
+                    return items[row][1]
+                else:
+                    pressed_on = None
+                continue
             if k in ("\x03", "\x11"):
                 return None
             elif k == curses.KEY_UP:

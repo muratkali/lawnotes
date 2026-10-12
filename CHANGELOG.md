@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.1
+
+- Splitting splits first: the note list opens inside the new pane, with your note still in view beside it (Esc keeps the same note in both).
+- Click a note in the list to open it (it opens when you let go of the button); the mouse wheel scrolls the list. Clicks work in every list: notes, themes, spelling, export.
+- The note list's hint about folders wraps in narrow panes instead of being cut off.
+
 ## 1.5.0
 
 - Themes (Option+T or F6): NERV (dark red), Unit-01 (purple and green) and Paper (light), or your own. New theme copies the current one into a file of colours (`#rrggbb`) in UCL Notes → .themes, so every Mac has it; save it and Law Notes updates straight away. Mistakes in a theme file are reported with their line.

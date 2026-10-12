@@ -467,11 +467,31 @@ class SessionTests(unittest.TestCase):
         s.keys(b"\x1b[<2;4;1M\x1b[<2;4;1m", 0.5)                  # right-click inside the selection
         s.keys(b"\x1b[B" * 5 + b"\r\x13", 0.6)                      # Cut Copy Paste Highlight Italic Bold
         s.keys(b"\x1b[<2;4;1M\x1b[<2;4;1m", 0.5)
-        s.keys(b"\x1b[B" * 5 + b"\r", 0.8)                          # Paste Select Highlight Undo Redo Split
-        screen = s.keys(b"\x1b", 0.8)                                # Esc: the same note in the new pane
-        self.assertEqual(screen.count("Menu.md"), 2)                  # two status bars
+        screen = s.keys(b"\x1b[B" * 5 + b"\r", 0.8)                 # Paste Select Highlight Undo Redo Split
+        self.assertIn("Notes in", screen)                             # the new pane shows the note list
+        s.keys(b"\x1b", 0.8)                                         # Esc: the same note in the new pane
+        self.assertNotIn("only pane", s.keys(b"\x1bw", 0.6))         # Option+W closes one of two panes
+        self.assertIn("only pane", s.keys(b"\x1bw", 0.6))
         self.assertTrue(s.quit())
         self.assertEqual(open(note).read().splitlines(), ["**alpha** X"])
+
+    def test_split_then_click_a_note(self):
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        left, right = (os.path.join(lawnotes.NOTES_DIR, n) for n in ("SplitLeft.md", "SplitRight.md"))
+        open(left, "w").write("left note\n")
+        open(right, "w").write("right note\n")
+        future = time.time() + 3600
+        os.utime(right, (future, future))                          # newest: first in the list
+        s = Session(left)
+        screen = s.keys(b"\x1bd", 0.8)                             # Option+D: split, list in the new pane
+        self.assertIn("Notes in", screen)
+        self.assertIn("SplitRight.md", screen)
+        s.keys(b"\x1b[<0;70;8M", 0.3)                              # press on the first note (below the guide)...
+        s.keys(b"\x1b[<0;70;8m", 0.6)                              # ...and let go: it opens
+        s.keys(b"\x05!\x13", 0.5)                                   # type at the end of its line
+        self.assertTrue(s.quit())
+        self.assertEqual(open(right).read(), "right note!\n")
+        self.assertEqual(open(left).read(), "left note\n")
 
     def test_new_theme_and_switching(self):
         note = os.path.join(lawnotes.NOTES_DIR, "Themed.md")
