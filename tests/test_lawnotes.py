@@ -394,10 +394,25 @@ class Session:
         return out
 
     def keys(self, data, seconds=0.4):
-        try:
-            os.write(self.fd, data)
-        except OSError:
-            pass
+        # Write only as fast as the editor reads: a full terminal input buffer must never block the
+        # test forever (an editor that stops reading fails the test, showing what it was doing).
+        deadline = time.time() + 30
+        while data:
+            if not select.select([], [self.fd], [], 0.1)[1]:
+                self.out += self.read(0.05)  # keep draining its output so it can't block either
+                if time.time() > deadline:
+                    raise AssertionError("the editor stopped reading input for 30 s; last screen:\n"
+                                         + self.out[-1500:].decode(errors="replace"))
+                continue
+            os.set_blocking(self.fd, False)
+            try:
+                data = data[os.write(self.fd, data[:256]):]
+            except BlockingIOError:
+                continue
+            except OSError:
+                break
+            finally:
+                os.set_blocking(self.fd, True)
         out = self.read(seconds)
         self.out += out
         return re.sub(rb"\x1b\[[0-9;?<>]*[A-Za-z~]|\x1b\(B|\x1b[=>]", b" ", out).decode(errors="replace")
