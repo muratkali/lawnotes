@@ -76,7 +76,8 @@ class HostileContentTests(unittest.TestCase):
 
 class FuzzTests(unittest.TestCase):
     def test_random_input_never_crashes(self):
-        rng = random.Random(1234)
+        seed = int(os.environ.get("LAWNOTES_FUZZ_SEED", "1234"))  # set it to try other input
+        rng = random.Random(seed)
         pieces = [b"\x1b", b"\x1b[", b"\x1b[<", b"\x1b[<65;", b"\x1b[200~", b"\x1b[201~", b"\x1bO",
                   b"\x1b[1;2", b"\x1b[27;2;13~", b"\r", b"\x7f", b"\t", "é§⚖中".encode(), b"\x00", b"\xff\xfe"]
         os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
@@ -99,11 +100,11 @@ class FuzzTests(unittest.TestCase):
         for _ in range(4):  # back out of any prompt or list the fuzz opened, then quit
             s.keys(b"\x1b", 0.4)
         closed = s.quit(60)  # a slow CI Mac may still be finishing an export the fuzz started
-        self.assertTrue(closed, "the editor didn't quit after fuzzing; last screen:\n"
+        self.assertTrue(closed, f"the editor didn't quit after fuzzing (seed {seed}); last screen:\n"
                         + s.out[-1500:].decode(errors="replace"))
         log = open(lawnotes.LOG_FILE).read() if os.path.exists(lawnotes.LOG_FILE) else ""
-        self.assertNotIn("CRASH", log)
-        self.assertNotIn(b"Traceback", s.out)
+        self.assertNotIn("CRASH", log, f"seed {seed}")
+        self.assertNotIn(b"Traceback", s.out, f"seed {seed}")
 
 
 if __name__ == "__main__":
