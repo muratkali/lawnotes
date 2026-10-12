@@ -92,8 +92,9 @@ class FuzzTests(unittest.TestCase):
         s.keys(b"", 1)
         for _ in range(4):  # back out of any prompt or list the fuzz opened, then quit
             s.keys(b"\x1b", 0.4)
-        closed = s.quit() or s.quit()
-        self.assertTrue(closed, "the editor didn't quit after fuzzing")
+        closed = s.quit(60)  # a slow CI Mac may still be finishing an export the fuzz started
+        self.assertTrue(closed, "the editor didn't quit after fuzzing; last screen:\n"
+                        + s.out[-1500:].decode(errors="replace"))
         log = open(lawnotes.LOG_FILE).read() if os.path.exists(lawnotes.LOG_FILE) else ""
         self.assertNotIn("CRASH", log)
         self.assertNotIn(b"Traceback", s.out)
