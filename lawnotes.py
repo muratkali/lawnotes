@@ -330,21 +330,59 @@ def save_setting(key, value):
 
 # Capitalised words that start sentences rather than case names.
 _STOP = r"(?!(?:In|The|See|As|Per|Following|Applying|Cf|But|And|Also|This|That|Under|After|Before|From|Since|Note|Compare|Contrast|Unlike|Like|Whereas|However|Thus|Here|Then)\b)"
+# A party: words, with of/the/for/and/&/de between them, an optional corporate suffix
+# ("Motors, Inc."), and one comma-joined limb that itself has a connector ("Lloyds of London").
+# "No. 1" is a tail, not part of the name. "and Re …" starts the next case, not this party.
 _WORD = r"[A-Z][\w'’\-]*"
-_NAME = rf"{_WORD}(?:\s+(?:(?:of|the|for|&)\s+)*{_WORD})*(?:\s+(?:plc|Ltd|LLP|Co|Inc)\.?)?"
-CASE_RE = re.compile(rf"\b{_STOP}(?:{_NAME}\s+v\.?\s+{_NAME}|Re\s+{_NAME})")
-CITE_RE = re.compile(
-    r"[\[(]\d{4}[\])](?:\s+\d+)?\s+[A-Z][A-Za-z]*(?:\s+[A-Z][A-Za-z]*)?\s+\d+(?:\s+\([A-Za-z]+\))?"
+_W = rf"(?!No\.?\s+\d){_WORD}"
+_CONNECTOR = r"(?:of|the|for|&|and(?!\s+Re\b)|de)"
+_CHUNK = rf"{_W}(?:\s+(?:{_CONNECTOR}\s+){{0,3}}{_W}){{0,12}}"
+_SUFFIX = r"(?:,?\s+(?:plc|Ltd|LLP|Co|Inc)\.?)"
+_COMMA_MORE = rf",\s+{_W}(?:\s+{_CONNECTOR}\s+{_W}){{1,4}}"
+_NAME = rf"{_CHUNK}(?:{_SUFFIX}|{_COMMA_MORE})?"
+_CASE_TAIL = (
+    r"(?:"
+    rf",\s+[Ee]x parte\s+{_CHUNK}"          # R v …, ex parte …
+    r"|\s+No\.?\s*\d+"                       # Re Baden No. 1
+    r"|\s+\((?:No\.?\s*\d+|The\s+[A-Z][\w'’\-]*(?:\s+[A-Z][\w'’\-]*){0,6})\)"  # (No. 2), (The Aliakmon)
+    r")?"
 )
-# A provision number: 2, 2A, 1.1, 2(1)(a), 1 (1); then more joined by and / or / to / , / –,
+CASE_RE = re.compile(rf"\b{_STOP}(?:{_NAME}(?:\s+v\.?\s+{_NAME}){{1,3}}|Re\s+{_NAME}){_CASE_TAIL}")
+# A report series: EWCA Civ, A.C., Q.B., W.L.R., Ch App, De G F & J, K&J, A2d, N.W.
+# At least one token is a word, a dotted abbreviation or an ampersand (not a bare "A").
+_TOK = r"[A-Z][A-Za-z0-9.]{0,14}(?:&[A-Za-z0-9.]{0,8})?"
+_SERIES = rf"(?=[A-Za-z0-9 .&]{{0,40}}(?:[A-Z]{{2}}|[A-Z][a-z]|[A-Z]\d|[.]|&)){_TOK}(?:\s+&\s+{_TOK}|\s+{_TOK}){{0,5}}"
+# Without a year only a report abbreviation will do (ER, NY, A2d, N.W.), not a word: "Week 3 Term 4".
+_REPORT = r"(?:[A-Z]{2,5}|[A-Z]\d[a-z]{1,2}|(?:[A-Z][a-z]?\.){1,4})(?![\w.])"
+_YEAR = r"[\[(]\d{4}(?:\s*[-–]\s*\d{2,4})?[\])]"  # [2019], (1932), (1870-71)
+_CITE_TAIL = r"(?:\s+\((?:[A-Za-z.]+\s+)?\d{4}\)|\s+\([A-Za-z.]+\))?"  # (HL), (1889), (Minn. 1910)
+CITE_RE = re.compile(
+    rf"{_YEAR}\s+(?:\d{{1,4}}\s+)?{_SERIES}(?:\s+\d{{1,4}}\s+{_SERIES}){{0,2}}\s+\d{{1,5}}{_CITE_TAIL}"
+    rf"|{_YEAR}\s+\d{{1,5}}\s+\([A-Za-z.]+\)"  # [1986] 785 (HL), no series
+    rf"|\b(?!\d{{1,4}}\s+(?:AM|PM)\b)\d{{1,4}}\s+{_REPORT}\s+\d{{1,5}}{_CITE_TAIL}"  # 45 ER 1184, 161 A2d 69
+)
+# A provision: 2, 2A, 1.1, 2(1)(a), 1 (1), S1 (2); then more joined by and / or / to / , / –,
 # e.g. "Articles 49 and 50", "Art. 21 (1) and (2)"; then the treaty, e.g. "Art. 3 (5) TEU".
 _TREATY = r"(?:TFEU|TEU)"
-_NUM = r"\d+[A-Z]*(?:\.\d+)*(?:\(\w+\)|\s\([0-9A-Za-z]{1,4}\))*"
-_MORE = rf"(?:(?:\s*[,\u2013-]\s*|\s+(?:and|or|to)\s+)(?:{_NUM}|\([0-9A-Za-z]{{1,4}}\)))*"
+_NUM = r"\d+[A-Z]*(?:\.\d+){0,4}(?:\(\w+\)|\s\([0-9A-Za-z]{1,4}\)){0,6}"
+_MORE = rf"(?:(?:\s*[,\u2013-]\s*|\s+(?:and|or|to)\s+)(?:{_NUM}|\([0-9A-Za-z]{{1,4}}\))){{0,8}}"
+# A short title: "Sale of Goods (Amendment) Act 1995", "Trusts (Jersey) Law 1984",
+# "Occupiers Liability Act of 1957", "The Law Reform … Act of 1945".
+_TITLE = rf"[A-Z][A-Za-z'’\-]+(?:\s+(?:(?:of|the|and|for|from)\s+)?[A-Z][A-Za-z'’\-]+){{0,14}}"
+_ACT = (
+    rf"\b(?:The\s+)?{_STOP}{_TITLE}(?:\s+\([A-Za-z][A-Za-z ]{{0,40}}\))?\s+(?:Act|Law)\s+(?:of\s+)?\d{{4}}"
+)
+_CONVENTION = (
+    r"\b(?:European|EU)\s+Convention"
+    r"(?:\s+(?:of|for)\s+(?:(?:the|of|for|and)\s+){0,2}(?:[A-Z][A-Za-z]+|[A-Z]{2,})"
+    r"(?:\s+(?:(?:the|of|for|and)\s+){0,2}(?:[A-Z][A-Za-z]+|[A-Z]{2,})){0,8})?"
+)
 STATUTE_RE = re.compile(
-    rf"\b(?:ss?|[Aa]rts?|regs?|sch|para|[Ss]ections?|[Aa]rticles?)\.?\s?{_NUM}{_MORE}(?:\s+{_TREATY}\b)?"
+    rf"\b(?:[Ss]s?|[Aa]rts?|regs?|[Ss]ch(?:edules?)?|para|[Ss]ub-?sections?|[Ss]ections?|[Aa]rticles?)"
+    rf"\.?\s?{_NUM}{_MORE}(?:\s+{_TREATY}\b)?"
     rf"|\b{_TREATY}\b"
-    rf"|\b{_STOP}(?:[A-Z][a-z]+\s+)+(?:\([A-Za-z ]+\)\s+)?Act\s+\d{{4}}"
+    rf"|{_ACT}|{_CONVENTION}"
+    rf"|\b[A-Z]{{2,8}}(?:\([A-Z]{{1,4}}\))?A\s+(?:1[89]\d{{2}}|20\d{{2}})\b"  # LPA 1925
 )
 # Party labels in problem answers: D (defendant), V (victim), C (claimant), also D1, D's.
 # Not after Part/Schedule/Chapter, where V is a Roman numeral.

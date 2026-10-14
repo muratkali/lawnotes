@@ -166,6 +166,52 @@ class TextTests(unittest.TestCase):
         self.assertEqual(statutes("the TFEU and the TEU, not TEUs"), ["TFEU", "TEU"])
         self.assertEqual(statutes("Part 1 of the Arts and Humanities course"), [])
 
+    def test_notes_citations_are_highlighted_in_full(self):
+        """Citations from the notes that were missed, or coloured only in part."""
+        def whole(rx, text):
+            self.assertEqual([m.group() for m in rx.finditer(text)], [text], text)
+
+        for text in ("Henningsen v. Bloomfield Motors, Inc.",
+                     "Leigh v Sillavan Ltd v Aliakmon Shipping Co Ltd (The Aliakmon)",
+                     "Re Baden No. 1", "Re Baden (No 1)", "Re Baden (No 2)",
+                     "Re Adams and the Kensington Vestry",
+                     "Re Baden’s Trust Deeds (No 1)", "Re Baden’s Deed Trusts (No 1)",
+                     "Re Baden’s Deed Trusts (No 2)",
+                     "R v District Auditor, ex parte West Yorkshire MCC",
+                     "Morice v Bishop v Durham",
+                     "Non-Marine Underwriters, Lloyds of London v Scalera",
+                     "R v Deputy Governor of Parkhurst Prison, Ex parte Hague",
+                     "Freeman v Home Office (No. 2)",
+                     "Majrowski v Guy’s and St Thomas’s NHS Trust"):
+            whole(lawnotes.CASE_RE, text)
+        self.assertEqual([m.group() for m in lawnotes.CASE_RE.finditer(
+            "Donoghue v Stevenson, Lord Atkin held")], ["Donoghue v Stevenson"])
+        for text in ("115 NY 506", "22 NE 188 (1889)", "32 NJ 358", "161 A2d 69 (1960)",
+                     "[1986] 785 (HL)", "(1870-71) LR 6 Ch App 597", "45 ER 1184",
+                     "(1984) 50 P & CR 119", "(1862) 2 De G F & J 264", "(1857) 3 K&J 497",
+                     "(1841) Cr & Ph 240", "[2005] 2 A.C. 373", "[2016] A.C. 219",
+                     "(1844) 1 Car & Kir 257", "(1838) 8 AD & E 602", "112 ER 966",
+                     "(1830) 4 Car & P 239", "172 ER 687", "87 ER 928", "129 ER 278",
+                     "(1830) 4 C& P 349", "[1968] 1 Q.B. 379", "[2008] 1 A.C. 962",
+                     "[1985] 1 W.L.R. 1242", "[1990] 2 A.C. 1", "124 N.W. 221 (Minn. 1910)"):
+            whole(lawnotes.CITE_RE, text)
+        for text in ("meet at 10 AM 30", "see page 3 Week 4", "Part 2 Chapter 3", "Year 2 Term 1",
+                     "Lecture 5 Slides 12", "In 2019 Parliament 2 times"):
+            self.assertEqual([m.group() for m in lawnotes.CITE_RE.finditer(text)], [], text)
+        self.assertEqual([m.group() for m in lawnotes.STATUTE_RE.finditer("an Act of Parliament 2013")], [])
+        for text in ("LPA 1925", "subsection 3", "Schedule 1", "S1 (2)",
+                     "Sale of Goods (Amendment) Act 1995", "Law of Property Act 1925",
+                     "Trusts (Jersey) Law 1984",
+                     "Trusts of Land and Appointment of Trustees Act 1996",
+                     "Occupiers Liability Act of 1957", "Occupiers Liability Act of 1984",
+                     "The Law Reform (Contributory Negligence) Act of 1945",
+                     "Protection from Harassment Act of 1997",
+                     "Automated and Electric Vehicles Act 2018",
+                     "European Convention", "EU Convention of Human Rights",
+                     "European Convention for the Protection of Human Rights",
+                     "European Convention for PHR"):
+            whole(lawnotes.STATUTE_RE, text)
+
     def test_theme_files(self):
         for name, palette in lawnotes.THEMES.items():
             self.assertEqual(lawnotes.parse_theme(lawnotes.theme_text(name, palette)), (palette, []), name)

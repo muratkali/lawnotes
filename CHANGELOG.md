@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Case names, law reports and Acts are highlighted in full when the notes write them out: a second “v”, “ex parte” and “Re … (No 1)”; reports such as [2005] 2 A.C. 373, (1870-71) LR 6 Ch App 597, 45 ER 1184 and 161 A2d 69; and statute titles such as “Occupiers Liability Act of 1957”, “Trusts (Jersey) Law 1984”, LPA 1925, Schedule 1 and the European Convention.
+
 ## 1.5.2
 
 - One stray byte that isn't text (from a terminal set to another encoding, or a glitchy remote connection) made Law Notes silently swallow up to about 50 following keystrokes, until you paused for a second. Now only that byte is dropped: Law Notes reads and decodes the input itself.
