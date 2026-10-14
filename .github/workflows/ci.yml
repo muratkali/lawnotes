@@ -13,6 +13,7 @@ jobs:
   test:
     name: tests (${{ matrix.python }})
     runs-on: macos-latest
+    timeout-minutes: 15  # the suite takes ~3 minutes; a hang fails instead of running for 6 hours
     strategy:
       fail-fast: false
       matrix:
