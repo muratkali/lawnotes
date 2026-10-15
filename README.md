@@ -5,6 +5,7 @@
 - Highlights case names (*Donoghue v Stevenson*), citations (`[1932] AC 562`) and statutes (`s 2(1)`, *Human Rights Act 1998*).
 - Templates for case briefs, IRAC problem answers, statutes, essay plans and lecture notes.
 - Search across all notes (^P), a case index across all notes (^B), and an outline of the open note (^L).
+- Revision cards (Option+C): your case briefs and case bullets become cards to revise, due cards first; progress syncs between Macs.
 - British English spell check using the Mac's own dictionary, which knows legal Latin.
 - Saves as you type, never overwrites a note changed on another Mac, and keeps version history (^R).
 
