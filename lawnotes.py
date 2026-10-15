@@ -28,6 +28,7 @@ Keys (press ^G inside the editor for this list)
   Shift+Enter   new line without a new bullet (Option+Enter also works)
   ^P search all notes   ^B case index (every case across all notes)
   ^R version history — restore an earlier version of this note
+  Option+C revision cards — revise the cases in your notes (F7 also works)
   Shift+arrows select   ^C copy   ^X cut   ^V paste (Mac clipboard); click to place the cursor
   ^K cut line    ^U paste lines   ^Z undo          ^Y redo
   ^A / ^E line start / end        Option/Ctrl+arrows move by word
@@ -1147,6 +1148,184 @@ def clipboard_get():
         return None
 
 
+# --- Revision cards ------------------------------------------------------------
+
+# Progress lives in the notes folder, so every Mac shares it; history keeps only notes, not this.
+REVISION_FILE = os.path.join(NOTES_DIR, ".revision.json")
+REVIEW_DAYS = (0, 1, 3, 7, 14, 30, 60)  # days until a card is due again, by box (Leitner)
+EMPTY_FIELD_RE = re.compile(r"^\s*(?:[-*+]\s+)?\*\*[^*]+(?::\*\*|\*\*:)\s*$")  # "- **Obiter:** " left blank
+CITATION_FIELD_RE = re.compile(r"^\s*(?:[-*+]\s+)?\*\*Citation:?\*\*:?", re.I)
+
+
+def first_case(text):
+    """The first case name in text and the citation right after it ('' if none), or (None, '')."""
+    m = CASE_RE.search(text)
+    if not m:
+        return None, ""
+    rest = text[m.end():]
+    cm = CITE_RE.match(text, m.end() + len(rest) - len(rest.lstrip(" ,*_")))
+    return m, cm.group() if cm else ""
+
+
+def card_back(lines):
+    """The back of a card: no comments or blank template fields, no runs of blank lines."""
+    out = []
+    for line in lines:
+        line = COMMENT_RE.sub("", line).rstrip()
+        if EMPTY_FIELD_RE.match(line) or re.fullmatch(r"\s*[-*+]", line):
+            continue
+        if line.strip() or (out and out[-1]):
+            out.append(line)
+    while out and not out[-1]:
+        out.pop()
+    return out
+
+
+def note_cards(rel, lines):
+    """Revision cards in one note, in note order: [{id, name, front, back, rel, line}].
+    A case brief (a heading that starts with a case name) is a card: the case and its citation on
+    the front, the brief on the back. A bullet naming a case elsewhere is a lighter card: the case
+    on the front, the bullet and its sub-bullets on the back, if they say more than the name and
+    citation. One card per case per note: its brief, or else the first bullet that says something
+    about it (later mentions tend to apply the case, e.g. in a problem answer, not explain it)."""
+    cards, covered = {}, set()
+
+    def add(m, front, back, i):
+        name = " ".join(m.group().split())
+        if name.lower() not in cards:
+            cards[name.lower()] = {"id": f"{rel}::{name.lower()}", "name": name, "front": front, "back": back,
+                                   "rel": rel, "line": i}
+
+    for i, line in enumerate(lines):
+        h = HEADING_RE.match(line)
+        m, cite = first_case(line[h.end():].strip().lstrip("*_ ")) if h else (None, "")
+        if not m or m.start() != 0:  # "# Duty of care", "## Problem: … Caparo v Dickman": not briefs
+            continue
+        end = i + 1
+        while end < len(lines) and not (HEADING_RE.match(lines[end])
+                                        and len(HEADING_RE.match(lines[end]).group(1)) <= len(h.group(1))):
+            end += 1
+        covered.update(range(i, end))
+        body = []
+        for l in lines[i + 1:end]:
+            cm = CITE_RE.search(l) if CITATION_FIELD_RE.match(l) else None
+            if cm:  # "- **Citation:** [1932] AC 562" goes on the front
+                cite = cite or cm.group()
+                continue
+            body.append(l)
+        back = card_back(body)
+        if back:  # a template not filled in yet isn't a card
+            add(m, " ".join(f"{m.group()} {cite}".split()), back, i)
+
+    for i, line in enumerate(lines):
+        bm = BULLET_RE.match(line)
+        if i in covered or not bm or bm.group(2) == ">" or bm.group(4):  # quotes and to-dos aren't cards
+            continue
+        m, _ = first_case(line[bm.end():])
+        if not m or " ".join(m.group().split()).lower() in cards:
+            continue
+        end = i + 1
+        while (end < len(lines) and lines[end].strip() and not HEADING_RE.match(lines[end])
+               and len(lines[end]) - len(lines[end].lstrip()) > len(bm.group(1))):
+            end += 1
+        block = lines[i:end]
+        said = CITE_RE.sub(" ", CASE_RE.sub(" ", " ".join(COMMENT_RE.sub("", l) for l in block)))
+        if len(re.findall(r"[A-Za-z]{2,}", said)) < 2:  # just "- Anns v Merton [1978] AC 728"
+            continue
+        add(m, " ".join(m.group().split()), card_back(l[len(bm.group(1)):] for l in block), i)
+    return sorted(cards.values(), key=lambda c: c["line"])
+
+
+def _review_time(rec):
+    try:
+        return float(rec.get("at", 0))
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
+
+
+def merge_progress(*stores):
+    """Per card, the latest review wins: revising on two Macs before iCloud syncs loses nothing."""
+    out = {}
+    for store in stores:
+        for cid, rec in store.items():
+            if isinstance(rec, dict) and (cid not in out or _review_time(rec) > _review_time(out[cid])):
+                out[cid] = rec
+    return out
+
+
+def read_progress(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            cards = json.load(f).get("cards")
+        return cards if isinstance(cards, dict) else {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def progress_copies():
+    """Conflict copies iCloud made of REVISION_FILE (".revision 2.json"): merged, then removed."""
+    folder, base = os.path.split(REVISION_FILE)
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    return [os.path.join(folder, n) for n in sorted(names)
+            if n != base and n.startswith(base[:-5]) and n.endswith(".json")]
+
+
+def load_progress():
+    return merge_progress(read_progress(REVISION_FILE), *(read_progress(p) for p in progress_copies()))
+
+
+def save_progress(updates):
+    """Merge updates into the progress on disk (read again: another Mac may have written it since)
+    and write it so it's never half-written. Returns the merged progress; raises OSError."""
+    copies = progress_copies()
+    merged = merge_progress(read_progress(REVISION_FILE), *(read_progress(p) for p in copies), updates)
+    os.makedirs(os.path.dirname(REVISION_FILE), exist_ok=True)
+    tmp = REVISION_FILE + ".saving~"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "cards": merged}, f, indent=1, sort_keys=True, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, REVISION_FILE)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise
+    for p in copies:
+        with contextlib.suppress(OSError):
+            os.remove(p)
+    return merged
+
+
+def schedule(rec, rating, now):
+    """A card's progress after a rating: 1 again (due today), 2 hard (same interval, at least a
+    day), 3 good (the next box: 1, 3, 7, 14, 30, then 60 days)."""
+    rec = rec if isinstance(rec, dict) else {}
+    try:
+        box = max(0, min(int(rec.get("box", 0)), len(REVIEW_DAYS) - 1))
+        reviews = int(rec.get("reviews", 0))
+    except (TypeError, ValueError):
+        box = reviews = 0
+    box = 0 if rating == 1 else max(1, box) if rating == 2 else min(box + 1, len(REVIEW_DAYS) - 1)
+    due = datetime.date.fromtimestamp(now) + datetime.timedelta(days=REVIEW_DAYS[box])
+    return {"box": box, "due": due.isoformat(), "at": round(now, 3), "reviews": reviews + 1}
+
+
+def revision_queue(cards, progress, today):
+    """Cards due (longest overdue first), then new ones in note order; the rest wait. today: ISO date."""
+    due, new = [], []
+    for n, c in enumerate(cards):
+        rec = progress.get(c["id"])
+        if not isinstance(rec, dict) or not isinstance(rec.get("due"), str):
+            new.append(c)
+        elif rec["due"] <= today:
+            due.append((rec["due"], n, c))
+    return [c for _, _, c in sorted(due, key=lambda d: d[:2])] + new
+
+
 def notes_location():
     """Where the notes really are, in words: 'iCloud Drive/UCL Notes' or '~/UCL/notes'."""
     real, icloud = os.path.realpath(NOTES_DIR), os.path.realpath(ICLOUD_DIR)
@@ -1386,6 +1565,8 @@ HELP = [
     ("^P", "Search all notes: every line that mentions what you type, in every note. Enter jumps there."),
     ("^B", "Case index: every case cited in any note, with its citation and the notes that mention it."),
     ("^L", "Outline: jump to any heading or case in this note."),
+    ("#", "Revising"),
+    ("Option+C", "Revision cards from your notes: each case brief (^T) is a card (the case and citation on the front, the brief on the back), and so is a bullet that names a case and says something about it. Choose this note, its folder or all notes. Space shows the answer; then 1 again, 2 hard, 3 good. Cards come back after 1, 3, 7, 14, 30, then 60 days; due cards first, then new ones. Esc ends. Progress is kept in UCL Notes, so every Mac shares it. F7 does the same."),
     ("#", "Moving around"),
     ("^F", "Find. Press ^F and Enter again (or F3) for the next match; Esc clears the highlight."),
     ("^A  ^E", "Start / end of the line."),
@@ -2182,7 +2363,7 @@ class App:
             first = self.get_key()
             if first in ("\r", "\n"):
                 return ("key", "shift-enter")  # Option+Enter on terminals using Option as Meta
-            if first in ("b", "f", "e", "d", "D", "w", "o", "h", "t", "\x7f", "\x08"):
+            if first in ("b", "f", "e", "d", "D", "w", "o", "h", "t", "c", "\x7f", "\x08"):
                 return ("alt", first)
             if isinstance(first, int):  # Esc + an arrow curses already decoded: Option+arrow
                 return ("key", OPTION_ARROWS.get(first))
@@ -2660,6 +2841,138 @@ class App:
         path, _, i, j, _ = hit
         self.goto(path, i, j)
 
+    def revise(self):
+        """Option+C / F7: revision cards from the case briefs and case bullets in this note, its
+        folder or all notes. Cards due come first, then new ones; Esc ends with a summary."""
+        here, cards, rel_here = os.path.realpath(self.buf.path), [], None
+        for path, rel, lines in self.all_notes():
+            if os.path.realpath(path) == here:
+                rel_here = rel
+            cards += note_cards(rel, lines)
+        progress = load_progress()
+        today = datetime.date.today().isoformat()
+        folder = os.path.dirname(rel_here or "")
+        scopes = [(f"This note: {rel_here}", "this note", lambda r: r == rel_here)]
+        if folder:
+            scopes.append((f"This folder: {folder}/", f"{folder}/", lambda r: r.startswith(folder + "/")))
+        scopes.append(("All notes", "all notes", lambda r: True))
+        items = []
+        for label, name, wanted in scopes:
+            mine = [c for c in cards if wanted(c["rel"])]
+            queue = revision_queue(mine, progress, today)
+            new = sum(c["id"] not in progress for c in queue)
+            items.append((f"{label}   · {len(queue) - new} due, {new} new, {len(mine)} cards", (name, mine, queue)))
+        choice = self.pick("Revision cards — what to revise", lambda q: [
+            it for it in items if q.lower() in it[0].lower()],
+            guide="Each case brief (^T) is a card, and so is a bullet that names a case and says something about it.")
+        if not choice:
+            return
+        name, mine, queue = choice
+        if not mine:
+            self.say(f"No cards in {name} yet: write a case brief (^T), or a bullet naming a case", 10)
+            return
+        if not queue:
+            when = min(progress[c["id"]]["due"] for c in mine)
+            day = datetime.date.fromisoformat(when).strftime("%a %d %b")
+            self.say(f"Nothing due in {name}: the next card is due {day}", 10)
+            return
+        tally, failed, shown, top, done = {1: 0, 2: 0, 3: 0}, None, False, 0, 0
+        while queue:
+            card = queue[0]
+            top = self.draw_card(card, shown, top, f"{name} · {done + 1} of {done + len(queue)}",
+                                 card["id"] not in progress)
+            key = self.get_key()
+            if key is None or key == curses.KEY_RESIZE:
+                continue
+            key = self.normalise(key)
+            if key in ("esc", "\x03", "\x07", "\x11"):
+                break
+            if not shown:
+                shown = key in ENTER or key == " "
+                top = 0
+            elif key in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE, curses.KEY_NPAGE):
+                top += {curses.KEY_UP: -1, curses.KEY_DOWN: 1, curses.KEY_PPAGE: -10, curses.KEY_NPAGE: 10}[key]
+            elif key in ("1", "2", "3"):
+                rating = int(key)
+                rec = progress[card["id"]] = schedule(progress.get(card["id"]), rating, time.time())
+                try:
+                    progress = save_progress({card["id"]: rec})  # with any progress from other Macs
+                except OSError as e:
+                    failed = e.strerror or str(e)
+                tally[rating] += 1
+                queue.pop(0)
+                if rating == 1:
+                    queue.append(card)  # again: once more before the session ends
+                shown, done = False, done + 1
+        rated = sum(tally.values())
+        msg = (f"Revised {rated} card{'s' * (rated != 1)}: {tally[3]} good, {tally[2]} hard, {tally[1]} again"
+               if rated else "Revision ended: no cards rated")
+        if queue:
+            msg += f" · {len(queue)} left"
+        if failed:
+            msg += f" · PROGRESS NOT SAVED ({failed})"
+        self.say(msg, 12)
+
+    def draw_card(self, card, shown, top, where, new):
+        """One revision card, full screen: the front, and the back once shown (wrapped, coloured
+        like the note, scrolled from row `top`). Returns `top`, kept inside the back."""
+        H, W = self.scr.getmaxyx()
+        self.scr.erase()
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        if H < 6 or W < 20:
+            self.put(0, 0, "Window too small"[:W - 1])
+            self.scr.refresh()
+            return top
+        width = max(10, min(MAX_TEXT_WIDTH, W - 3))
+
+        def rows(line, bold=0):
+            attrs = [a | bold for a in self.highlight(line)]
+            starts = wrap_starts(line, width)
+            return [(line, a, starts[k + 1] if k + 1 < len(starts) else len(line), attrs)
+                    for k, a in enumerate(starts)]
+
+        def show(y, row):
+            line, a, e, attrs = row
+            j = a
+            while j < e:
+                r = j
+                while r < e and attrs[r] == attrs[j]:
+                    r += 1
+                self.put(y, 1 + j - a, line[j:r], attrs[j])
+                j = r
+
+        self.put(0, 1, f"Revision — {where}"[:W - 2], self.A["h1"])
+        self.put(1, 1, (card["rel"] + (" · new card" if new else ""))[:W - 2], self.A["dim"])
+        y = 3
+        for row in rows(card["front"], curses.A_BOLD)[:max(1, H - 6)]:
+            show(y, row)
+            y += 1
+        hints = [("Space", "Show the answer"), ("Esc", "End")]
+        if shown:
+            self.put(y, 1, "─" * width, self.A["dim"])
+            y += 1
+            back = [r for line in card["back"] for r in rows(line)]
+            view = max(1, H - 1 - y)
+            top = max(0, min(top, len(back) - view))
+            for row in back[top:top + view]:
+                show(y, row)
+                y += 1
+            hints = [("1", "Again"), ("2", "Hard"), ("3", "Good"), ("Esc", "End")]
+            if len(back) > view:
+                hints.insert(3, ("↑↓", "More"))
+        x = 1
+        for key, label in hints:  # like the editor's bottom bar: what fits
+            if x + len(key) + len(label) + 2 >= W:
+                break
+            self.put(H - 1, x, key, self.A["key"])
+            self.put(H - 1, x + len(key) + 1, label, self.A["dim"])
+            x += len(key) + len(label) + 3
+        self.scr.refresh()
+        return top
+
     def history_menu(self):
         b, h = self.buf, self.history
         if not h.ok:
@@ -3018,7 +3331,8 @@ class App:
                   ("Split one above the other", "Option+Shift+D", ["split-down"])]
         if len(list(self.panes())) > 1:
             items += [("Next pane", "Option+O", ["next-pane"]), ("Close this pane", "Option+W", ["close-pane"])]
-        items += [None, ("Export…", "Option+E", ["export"]), ("Themes…", "Option+T", ["themes"])]
+        items += [None, ("Revision cards…", "Option+C", ["cards"]), ("Export…", "Option+E", ["export"]),
+                  ("Themes…", "Option+T", ["themes"])]
         choices = [i for i, it in enumerate(items) if it]
         width = max(len(it[0]) + len(it[1]) for it in items if it) + 5
         H, W = self.scr.getmaxyx()
@@ -3127,7 +3441,7 @@ class App:
                 return r
             if r[0] == "alt":
                 return {"b": "word-left", "f": "word-right", "e": "export", "d": "split-right",
-                        "D": "split-down", "w": "close-pane", "o": "next-pane", "h": "highlight", "t": "themes",
+                        "D": "split-down", "w": "close-pane", "o": "next-pane", "h": "highlight", "t": "themes", "c": "cards",
                         "\x7f": "delete-word-left", "\x08": "delete-word-left"}[r[1]]
             return r[1]  # a curses key, a name, or None for keys we don't use
         if key == curses.KEY_MOUSE:
@@ -3274,6 +3588,8 @@ class App:
             self.export()
         elif key in ("themes", curses.KEY_F6):
             self.choose_theme()
+        elif key in ("cards", curses.KEY_F7):
+            self.revise()
         elif key == "\x0c":
             self.outline()
         elif key == "\x0b":
