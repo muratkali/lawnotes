@@ -43,7 +43,10 @@ Option+E (or F5) in the editor, or from a terminal:
 
 ```sh
 lawnotes --export Tort/Negligence docx    # or pdf; saved to ~/Downloads
+lawnotes --export Tort/Essay docx --tables
 ```
+
+For essays and coursework, choose "with tables of cases and legislation" (or add `--tables`): an OSCOLA Table of Cases and Table of Legislation go after the title (the first `# ` heading), built from the case names, citations, Acts and EU treaty articles in the note, with a page break before the note itself in Word.
 
 Word export needs pandoc: `brew install pandoc`. PDF export uses macOS itself.
 
