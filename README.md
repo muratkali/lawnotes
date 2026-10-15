@@ -7,6 +7,7 @@
 - Search across all notes (^P), a case index across all notes (^B), and an outline of the open note (^L).
 - Revision cards (Option+C): your case briefs and case bullets become cards to revise, due cards first; progress syncs between Macs.
 - Find and replace in one note or in all of them (Option+R), e.g. a misspelt case name or a wrong citation; ^R can undo it for any note.
+- Links between notes: type `[[` and pick a note. Option+L follows a link, or lists the notes linking to this one.
 - British English spell check using the Mac's own dictionary, which knows legal Latin.
 - Saves as you type, never overwrites a note changed on another Mac, and keeps version history (^R).
 
