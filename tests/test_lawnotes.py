@@ -354,6 +354,111 @@ class TextTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
+BRIEF_NOTE = """# Negligence
+
+## Donoghue v Stevenson
+- **Citation:** [1932] AC 562
+- **Court:** HL
+- **Facts:** snail in a bottle of ginger beer // check the report
+- **Issue:** 
+- **Held:** a manufacturer owes a duty of care to the ultimate consumer of its products
+- **Obiter:** 
+
+## Caparo Industries plc v Dickman [1990] 2 AC 605
+- **Citation:** 
+- **Facts:** 
+
+## Duty of care
+- Caparo Industries plc v Dickman [1990] 2 AC 605: three-stage test
+  - foreseeability, proximity, fair just and reasonable
+  - Robinson v Chief Constable of West Yorkshire [2018] UKSC 4: not a test for every case
+- Anns v Merton [1978] AC 728
+- [ ] read Smith v Jones on breach
+- Duty: Donoghue v Stevenson [1932] AC 562
+> Hedley Byrne v Heller on negligent misstatement
+
+## Problem: Is D liable under Caparo v Dickman?
+- Whether D owes V a duty, applying Caparo Industries plc v Dickman to the facts
+"""
+
+
+class RevisionTests(unittest.TestCase):
+    def setUp(self):
+        self.saved = lawnotes.REVISION_FILE
+        self.dir = tempfile.mkdtemp(dir=TMP)
+        lawnotes.REVISION_FILE = os.path.join(self.dir, ".revision.json")
+
+    def tearDown(self):
+        lawnotes.REVISION_FILE = self.saved
+
+    def test_cards_from_briefs_and_bullets(self):
+        cards = lawnotes.note_cards("Tort/Negligence.md", BRIEF_NOTE.split("\n"))
+        self.assertEqual([(c["front"], c["line"]) for c in cards], [
+            ("Donoghue v Stevenson [1932] AC 562", 2),             # the brief; citation from its field
+            ("Caparo Industries plc v Dickman", 15),               # unfilled brief: the bullet instead
+            ("Robinson v Chief Constable of West Yorkshire", 17),  # a sub-bullet about another case
+        ])                                                         # not: Anns (nothing said), to-dos, quotes
+        donoghue, caparo, robinson = cards
+        self.assertEqual(donoghue["id"], "Tort/Negligence.md::donoghue v stevenson")
+        self.assertEqual(donoghue["back"], [                       # blank fields and comments left out
+            "- **Court:** HL",
+            "- **Facts:** snail in a bottle of ginger beer",
+            "- **Held:** a manufacturer owes a duty of care to the ultimate consumer of its products"])
+        self.assertEqual(caparo["back"], [                         # the bullet and its sub-bullets only,
+            "- Caparo Industries plc v Dickman [1990] 2 AC 605: three-stage test",  # not the problem answer
+            "  - foreseeability, proximity, fair just and reasonable",
+            "  - Robinson v Chief Constable of West Yorkshire [2018] UKSC 4: not a test for every case"])
+        self.assertEqual(robinson["back"], ["- Robinson v Chief Constable of West Yorkshire [2018] UKSC 4: "
+                                            "not a test for every case"])
+        self.assertEqual(lawnotes.note_cards("x.md", ["# Duty of care", "- foreseeability", "## R v Brown",
+                                                      "- **Held:** consent no defence to ABH"])[0]["front"],
+                         "R v Brown")
+        self.assertEqual(lawnotes.note_cards("x.md", lawnotes.TEMPLATES[0][1]), [])  # an empty template
+
+    def test_schedule_and_queue(self):
+        now = time.mktime((2026, 10, 15, 12, 0, 0, 0, 0, -1))
+        good = lawnotes.schedule(None, 3, now)
+        self.assertEqual((good["box"], good["due"], good["reviews"]), (1, "2026-10-16", 1))
+        good = lawnotes.schedule(good, 3, now)
+        self.assertEqual((good["box"], good["due"]), (2, "2026-10-18"))
+        self.assertEqual(lawnotes.schedule(good, 2, now)["due"], "2026-10-18")  # hard: same interval
+        self.assertEqual(lawnotes.schedule(None, 2, now)["due"], "2026-10-16")  # ...at least a day
+        again = lawnotes.schedule(good, 1, now)
+        self.assertEqual((again["box"], again["due"], again["reviews"]), (0, "2026-10-15", 3))
+        self.assertEqual(lawnotes.schedule({"box": "junk"}, 3, now)["box"], 1)  # a damaged entry
+        cards = [{"id": n} for n in "abcde"]
+        progress = {"a": {"due": "2026-10-20"}, "b": {"due": "2026-10-15"}, "d": {"due": "2026-10-01"}}
+        self.assertEqual([c["id"] for c in lawnotes.revision_queue(cards, progress, "2026-10-15")],
+                         ["d", "b", "c", "e"])                     # due (oldest first), new; a waits
+
+    def test_progress_merges_and_saves_atomically(self):
+        path = lawnotes.REVISION_FILE
+        self.assertEqual(lawnotes.load_progress(), {})
+        open(path, "w").write("{not json")
+        self.assertEqual(lawnotes.load_progress(), {})              # damaged: starts again, no crash
+        lawnotes.save_progress({"x": {"box": 3, "at": 100.0}, "y": {"box": 1, "at": 50.0}})
+        # another Mac: a later review of y, an older one of x, and an iCloud conflict copy
+        copy = os.path.join(self.dir, ".revision 2.json")
+        json.dump({"version": 1, "cards": {"x": {"box": 1, "at": 90.0}, "y": {"box": 2, "at": 60.0},
+                                           "z": {"box": 4, "at": 10.0}}}, open(copy, "w"))
+        merged = lawnotes.save_progress({"w": {"box": 1, "at": 120.0}})
+        self.assertEqual({k: v["box"] for k, v in merged.items()}, {"x": 3, "y": 2, "z": 4, "w": 1})
+        self.assertEqual(json.load(open(path))["cards"], merged)
+        self.assertEqual(sorted(os.listdir(self.dir)), [".revision.json"])  # copy merged; no temp file left
+
+    def test_history_leaves_progress_out(self):
+        self.assertIn(".*", lawnotes.HISTORY_EXCLUDE.split("\n"))
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(os.path.join(lawnotes.NOTES_DIR, "Rev.md"), "w").write("# Rev\n")
+        lawnotes.REVISION_FILE = self.saved
+        lawnotes.save_progress({"Rev.md::r v brown": {"box": 1, "at": 1.0}})
+        lawnotes.History().snapshot(wait=True)
+        files = subprocess.run(["git", f"--git-dir={lawnotes.HISTORY_DIR}", "ls-tree", "-r", "--name-only", "HEAD"],
+                               capture_output=True, text=True).stdout.split()
+        self.assertIn("Rev.md", files)
+        self.assertNotIn(".revision.json", files)
+
+
 @unittest.skipUnless(lawnotes.find_tool("pandoc"), "export needs pandoc (brew install pandoc)")
 class ExportTests(unittest.TestCase):
     NOTE = [
@@ -419,14 +524,14 @@ class ExportTests(unittest.TestCase):
 class Session:
     """The editor running in a pseudo-terminal, driven by keystrokes."""
 
-    def __init__(self, *args, env=None):
+    def __init__(self, *args, env=None, size=(30, 100)):
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.environ.update({"TERM": "xterm-256color", **(env or {})})
             os.execv(sys.executable, [sys.executable, os.path.join(ROOT, "lawnotes.py"), *args])
         import fcntl
         import termios
-        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", size[0], size[1], 0, 0))
         self.out = self.read(2)
 
     def read(self, seconds=0.4):
@@ -849,6 +954,66 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(s.quit())
         self.assertEqual(open(b).read(), "# B\n\nfrom another Mac!\n")
         self.assertEqual(sorted(os.listdir(folder)), ["A.md", "B.md"])  # no conflict copy
+
+    def test_revision_session(self):
+        folder = os.path.join(lawnotes.NOTES_DIR, "Revise")
+        os.makedirs(folder, exist_ok=True)
+        note = os.path.join(folder, "Negligence.md")
+        open(note, "w").write(BRIEF_NOTE)
+        progress = os.path.join(lawnotes.NOTES_DIR, ".revision.json")
+        s = Session(note)
+        screen = s.keys(b"\x1bc", 0.8)                                 # Option+C: what to revise
+        self.assertIn("This note: Revise/Negligence.md", screen)
+        self.assertIn("This folder: Revise/", screen)
+        self.assertIn("0 due, 3 new, 3 cards", screen)
+        screen = s.keys(b"\r", 0.6)                                     # this note: the first card
+        self.assertIn("Donoghue v Stevenson", screen)
+        self.assertIn("[1932] AC 562", screen)
+        self.assertNotIn("snail", screen)
+        screen = s.keys(b" ", 0.5)                                       # Space shows the back
+        self.assertIn("snail in a bottle", screen)
+        self.assertNotIn("Obiter", screen)
+        self.assertIn("Good", screen)
+        screen = s.keys(b"3", 0.5)                                       # good: the next card
+        self.assertIn("Caparo Industries plc v Dickman", screen)
+        s.keys(b"\r", 0.4)
+        screen = s.keys(b"1", 0.5)                                       # again: comes back at the end
+        self.assertIn("Robinson", screen)
+        screen = s.keys(b"\x1b", 0.8)                                   # Esc ends, with a summary
+        self.assertIn("Revised 2 cards: 1 good, 0 hard, 1 again · 2 left", screen)
+        screen = s.keys(b"\x1b[18~", 0.8)                               # F7 opens it too
+        self.assertIn("1 due, 1 new, 3 cards", screen)                  # Caparo is due again today
+        s.keys(b"\x1b", 0.5)
+        self.assertTrue(s.quit())
+        cards = json.load(open(progress))["cards"]
+        self.assertEqual(cards["Revise/Negligence.md::donoghue v stevenson"]["box"], 1)
+        self.assertEqual(cards["Revise/Negligence.md::caparo industries plc v dickman"]["box"], 0)
+        self.assertEqual(open(note).read(), BRIEF_NOTE)                  # the note itself is untouched
+
+    def test_revision_card_wraps_in_a_narrow_paper_pane(self):
+        folder = os.path.join(lawnotes.NOTES_DIR, "Narrow")
+        os.makedirs(folder, exist_ok=True)
+        note = os.path.join(folder, "Brown.md")
+        open(note, "w").write("## R v Brown [1994] 1 AC 212\n- **Held:** consent is no defence to actual "
+                              "bodily harm inflicted for sexual gratification\n")
+        settings = os.path.join(lawnotes.NOTES_DIR, ".settings.json")
+        before = open(settings).read() if os.path.exists(settings) else None
+        open(settings, "w").write('{"theme": "Paper"}')
+        try:
+            s = Session(note, size=(20, 34))
+            s.keys(b"\x1bc", 0.8)
+            screen = s.keys(b"\r ", 0.8)
+            for word in ("consent", "defence", "bodily", "gratification"):  # wrapped, nothing cut off
+                self.assertIn(word, screen)
+            self.assertIn("Good", screen)                                # the ratings fit at 34 columns
+            self.assertIn(b"48;5;230", s.out)                            # Paper's cream background
+            s.keys(b"2\x1b", 0.6)
+            self.assertTrue(s.quit())
+        finally:
+            if before is None:
+                os.remove(settings)
+            else:
+                open(settings, "w").write(before)
 
     def test_history_snapshots_notes_only(self):
         d = os.path.join(lawnotes.NOTES_DIR, "Hist")
