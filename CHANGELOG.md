@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.5.3
 
 - Case names, law reports and Acts are highlighted in full when the notes write them out: a second “v”, “ex parte” and “Re … (No 1)”; reports such as [2005] 2 A.C. 373, (1870-71) LR 6 Ch App 597, 45 ER 1184 and 161 A2d 69; and statute titles such as “Occupiers Liability Act of 1957”, “Trusts (Jersey) Law 1984”, LPA 1925, Schedule 1 and the European Convention.
 

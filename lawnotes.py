@@ -55,7 +55,7 @@ import traceback
 import unicodedata
 from functools import lru_cache
 
-VERSION = "1.5.2"
+VERSION = "1.5.3"
 HELP_TITLE = "Help — Law Notes (beta)"
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
 NOTES_DIR = os.path.abspath(os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes")))
