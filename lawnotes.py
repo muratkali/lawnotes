@@ -21,6 +21,7 @@ set LAWNOTES_LANG=en_US to change, LAWNOTES_SPELL=0 to turn it off).
 Keys (press ^G inside the editor for this list)
   ^G help        ^S save          ^O open note     ^N new note     ^Q save & quit
   ^F find (Enter again or F3 for the next match; Esc clears the highlight)
+  Option+R find and replace, in this note or all notes (F4 also works)
   ^T insert template (case brief, IRAC, statute, essay plan, lecture)
   ^L outline — jump to a heading or a case mentioned in this note
   ^W spelling — fix the misspelt word with the correction the status bar shows
@@ -425,6 +426,26 @@ def wrap_starts(s, w):
         i = j + 1 if j > i else i + w
         starts.append(i)
     return tuple(starts)
+
+
+# Find and replace matches the exact text, capitals included: citations and case names are
+# case-sensitive ("[1932] AC 562", "Re Polemis").
+def replace_lines(lines, find, repl):
+    """(lines with every `find` replaced by `repl`, how many were replaced)."""
+    n = sum(line.count(find) for line in lines)
+    return ([line.replace(find, repl) for line in lines] if n else lines[:]), n
+
+
+def moved_col(line, cx, find, repl):
+    """Where a cursor at column cx of `line` belongs once every `find` in the line is replaced:
+    the same place in the text around it, or the end of the replacement if it was inside a match."""
+    shift, j = 0, line.find(find)
+    while 0 <= j < cx:
+        if j + len(find) > cx:
+            return j + shift + len(repl)
+        shift += len(repl) - len(find)
+        j = line.find(find, j + len(find))
+    return cx + shift
 
 
 # --- Text buffer -------------------------------------------------------------
@@ -1686,6 +1707,7 @@ HELP = [
     ("Option+C", "Revision cards from your notes: each case brief (^T) is a card (the case and citation on the front, the brief on the back), and so is a bullet that names a case and says something about it. Choose this note, its folder or all notes. Space shows the answer; then 1 again, 2 hard, 3 good. Cards come back after 1, 3, 7, 14, 30, then 60 days; due cards first, then new ones. Esc ends. Progress is kept in UCL Notes, so every Mac shares it. F7 does the same."),
     ("#", "Moving around"),
     ("^F", "Find. Press ^F and Enter again (or F3) for the next match; Esc clears the highlight."),
+    ("Option+R", "Find and replace, e.g. Donohue → Donoghue. Type what to replace (it starts as the selected text or your ^F search) and what to put instead, then choose: this note, all notes, or one match at a time (y replace, n skip, a all the rest, Esc stop). Capitals must match exactly. The replacements stay highlighted until Esc. ^Z undoes a replace in an open note; other notes are saved in version history first, so ^R can restore them. F4 does the same."),
     ("^A  ^E", "Start / end of the line."),
     ("Option+↑ ↓", "Top / bottom of the note."),
     ("Option+⌫", "Delete the word before the cursor (Option+Fn+⌫: the word after it)."),
@@ -2480,7 +2502,7 @@ class App:
             first = self.get_key()
             if first in ("\r", "\n"):
                 return ("key", "shift-enter")  # Option+Enter on terminals using Option as Meta
-            if first in ("b", "f", "e", "d", "D", "w", "o", "h", "t", "c", "\x7f", "\x08"):
+            if first in ("b", "f", "e", "d", "D", "w", "o", "h", "t", "c", "r", "\x7f", "\x08"):
                 return ("alt", first)
             if isinstance(first, int):  # Esc + an arrow curses already decoded: Option+arrow
                 return ("key", OPTION_ARROWS.get(first))
@@ -3150,6 +3172,188 @@ class App:
                 return
         self.say(f"“{self.search}” not found")
 
+    # Find and replace
+    def replace(self):
+        """Option+R / F4: replace text in this note, in every note, or one match at a time."""
+        b, sel = self.buf, self.selection()
+        start = self.selected_text() if sel and sel[0][0] == sel[1][0] else self.search
+        find = self.prompt("Replace: ", start)
+        if not find:
+            return
+        repl = self.prompt(f"Replace “{find}” with: ")
+        if repl is None:
+            return
+        if repl == find:
+            self.say("Nothing to change: that's the same text")
+            return
+        here = sum(line.count(find) for line in b.lines)
+        notes = self.notes_containing(find)
+        total = sum(n for _, _, _, n in notes)
+        if not (here or total):
+            self.say(f"“{find}” isn't in any note (capitals must match)", 6)
+            return
+        items = []
+        if here:
+            items.append((f"This note — {here:,} match{'es' * (here != 1)}", "note"))
+        if total:
+            items.append((f"All notes — {total:,} match{'es' * (total != 1)} in {len(notes)} "
+                          f"note{'s' * (len(notes) != 1)}", "all"))
+        if here:
+            items.append(("One at a time in this note — y replace, n skip, a all remaining, Esc stop", "review"))
+        instead = f"“{repl}”" if repl else "nothing"
+        choice = self.pick(f"Replace “{find}” with {instead}", lambda q: [
+            it for it in items if q.lower() in it[0].lower()])
+        if choice == "note":
+            n = self.replace_in_view(find, repl)
+            self.search = repl  # the replacements are highlighted; Esc clears
+            self.say(f"Replaced {n:,} in this note · ^Z undoes it", 8)
+        elif choice == "all":
+            self.replace_everywhere(find, repl, notes)
+        elif choice == "review":
+            self.replace_review(find, repl, instead)
+
+    def notes_containing(self, find):
+        """(path, name, buffer if open in a pane, matches) for each note with `find` in it. Notes open
+        in a pane are read from there, unsaved changes included. Only .md / .txt notes, never hidden files."""
+        open_bufs = {os.path.realpath(b.path): b for _, b in self.buffers()}
+        out, seen = [], set()
+        for _, rel, path in self.list_notes():
+            real = os.path.realpath(path)
+            name = os.path.basename(real)
+            if real in seen or name.startswith(".") or not name.endswith(NOTE_EXTS):  # links too
+                continue
+            seen.add(real)
+            buf = open_bufs.get(real)
+            try:
+                lines = buf.lines if buf is not None else Buffer(path).lines
+            except OSError:
+                continue
+            n = sum(line.count(find) for line in lines)
+            if n:
+                out.append((path, rel, buf, n))
+        return out
+
+    def replace_in_view(self, find, repl):
+        """Replace every match in the note in view, as one undo step. Cursors keep their place in the text."""
+        b = self.buf
+        lines, n = replace_lines(b.lines, find, repl)
+        if not n:
+            return 0
+        b.checkpoint("replace")
+        for p in self.panes():  # the same note in another pane: its cursor moves with the text too
+            if p is not self.pane and p.buf is b and p.cy < len(b.lines):
+                p.cx, p.anchor = moved_col(b.lines[p.cy], p.cx, find, repl), None
+        b.cx = moved_col(b.lines[b.cy], b.cx, find, repl)
+        b.lines = lines
+        self.anchor = None
+        return n
+
+    def replace_everywhere(self, find, repl, notes):
+        """Replace in every note. Notes open in a pane are changed there (^Z undoes it) and saved; the
+        others are saved the way the editor saves, after a version history snapshot so ^R can restore them."""
+        self.say("Replacing in all notes…", 60)
+        self.draw()
+        if any(buf is None for _, _, buf, _ in notes):
+            self.history.snapshot(wait=True)  # every note as it was, before anything changes
+        panes = {id(b): p for p, b in self.buffers()}
+        done, changed, problems = 0, 0, []
+        for path, rel, buf, _ in notes:
+            if buf is not None:
+                with self.viewing(panes[id(buf)]):
+                    n = self.replace_in_view(find, repl)
+                    saved = self.save_if_dirty()
+                if not saved:
+                    problems.append((f"{rel} — couldn't be saved; the change is in its pane, not saved yet", path))
+            else:
+                try:
+                    note = Buffer(path)
+                    note.lines, n = replace_lines(note.lines, find, repl)
+                    conflict = note.save() if n else None  # atomic; never over a newer version
+                except OSError as e:
+                    problems.append((f"{rel} — not changed: {e.strerror or e}", path))
+                    log(f"replace: couldn't write {rel}: {e}")
+                    continue
+                if conflict:  # changed on another Mac this very moment: it's left as it was
+                    problems.append((f"{rel} — changed elsewhere meanwhile, so left as it was; the replaced "
+                                     f"version is “{os.path.basename(note.path)}”", path))
+                    continue
+            done += n
+            changed += n > 0
+        if done:
+            self.search = repl  # the replacements are highlighted; Esc clears
+        summary = f"Replaced {done:,} in {changed} note{'s' * (changed != 1)}"
+        self.say(summary + " · ^Z undoes it in an open note; ^R restores an earlier version of the others", 10)
+        if problems:
+            path = self.pick(f"{summary} — {len(problems)} couldn't be written (Enter opens one)",
+                             lambda q: [it for it in problems if q.lower() in it[0].lower()])
+            if path:
+                self.goto(path, 0)
+            self.say(f"{summary} · {len(problems)} couldn't be written", 10)
+
+    def replace_review(self, find, repl, instead):
+        """One match at a time in this note: y replaces it, n skips it, a replaces it and all the rest,
+        Esc stops. Whatever is replaced is one undo step."""
+        b = self.buf
+        total = sum(line.count(find) for line in b.lines)
+        home, search = (b.cy, b.cx), self.search
+        self.search = ""  # only the match in question stands out (selected)
+        i, j, seen, done, end = 0, 0, 0, 0, None
+        while True:
+            j = b.lines[i].find(find, j)
+            while j < 0 and i + 1 < len(b.lines):
+                i += 1
+                j = b.lines[i].find(find)
+            if j < 0:
+                break
+            seen += 1
+            self.anchor, b.cy, b.cx = (i, j), i, j + len(find)  # the view moves to it
+            key = self.ask(f"Replace with {instead}?  y yes · n skip · a all remaining · Esc stop"
+                           f"   ({seen} of {max(seen, total)})", "yna")
+            if key is None:
+                break
+            if key == "n":
+                j += len(find)
+                continue
+            if not done:  # one undo step for all of it, which goes back to where the cursor was
+                b.cy, b.cx = home
+                b.checkpoint("replace")
+            line = b.lines[i]
+            if key == "a":
+                done += line[j:].count(find) + sum(l.count(find) for l in b.lines[i + 1:])
+                b.lines[i] = line[:j] + line[j:].replace(find, repl)
+                b.lines[i + 1:] = [l.replace(find, repl) for l in b.lines[i + 1:]]
+                end = (i, j + len(repl))
+                break
+            b.lines[i] = line[:j] + repl + line[j + len(find):]
+            done += 1
+            j += len(repl)
+            end = (i, j)
+        self.anchor = None
+        b.cy, b.cx = end or home
+        self.search = repl if done else search
+        self.say(f"Replaced {done:,} of {total:,}" + (" · ^Z undoes them all" if done else ""), 8)
+
+    def ask(self, question, keys):
+        """The note, with a question on the bottom line: one of `keys` (lower case), or None for Esc."""
+        while True:
+            self.draw(refresh=False)
+            H, W = self.scr.getmaxyx()
+            self.scr.move(H - 1, 0)
+            self.scr.clrtoeol()
+            self.put(H - 1, 1, question[:W - 2], self.A["h"])
+            self.scr.refresh()
+            k = self.get_key()
+            if k is None or k == curses.KEY_RESIZE:
+                continue
+            if k == "\x1b":
+                if self.read_escape() is None:
+                    return None
+                continue  # a click or a paste: not an answer
+            if k in ("\x03", "\x07", "\x11"):
+                return None
+            if isinstance(k, str) and k.lower() in keys:
+                return k.lower()
+
     def outline(self):
         entries, seen = [], set()
         for i, line in enumerate(self.buf.lines):
@@ -3453,8 +3657,8 @@ class App:
                   ("Split one above the other", "Option+Shift+D", ["split-down"])]
         if len(list(self.panes())) > 1:
             items += [("Next pane", "Option+O", ["next-pane"]), ("Close this pane", "Option+W", ["close-pane"])]
-        items += [None, ("Revision cards…", "Option+C", ["cards"]), ("Export…", "Option+E", ["export"]),
-                  ("Themes…", "Option+T", ["themes"])]
+        items += [None, ("Replace…", "Option+R", ["replace"]), ("Revision cards…", "Option+C", ["cards"]),
+                  ("Export…", "Option+E", ["export"]), ("Themes…", "Option+T", ["themes"])]
         choices = [i for i, it in enumerate(items) if it]
         width = max(len(it[0]) + len(it[1]) for it in items if it) + 5
         H, W = self.scr.getmaxyx()
@@ -3563,8 +3767,8 @@ class App:
                 return r
             if r[0] == "alt":
                 return {"b": "word-left", "f": "word-right", "e": "export", "d": "split-right",
-                        "D": "split-down", "w": "close-pane", "o": "next-pane", "h": "highlight", "t": "themes", "c": "cards",
-                        "\x7f": "delete-word-left", "\x08": "delete-word-left"}[r[1]]
+                        "D": "split-down", "w": "close-pane", "o": "next-pane", "h": "highlight", "t": "themes",
+                        "c": "cards", "r": "replace", "\x7f": "delete-word-left", "\x08": "delete-word-left"}[r[1]]
             return r[1]  # a curses key, a name, or None for keys we don't use
         if key == curses.KEY_MOUSE:
             event, self.mouse_event = self.mouse_event, None
@@ -3694,6 +3898,8 @@ class App:
             self.show_help()
         elif key == curses.KEY_F3:
             self.find(again=True)
+        elif key in ("replace", curses.KEY_F4):
+            self.replace()
         elif key == "\x17":
             self.fix_spelling()
         elif key == "\x14":
@@ -4007,6 +4213,9 @@ def self_test():
             "Lord Atkin in Donoghue v Stevenson")] == ["Donoghue v Stevenson"])
         check("build a table of cases", lambda: authorities(["R v Brown; Donoghue v Stevenson [1932] AC 562"])["cases"]
               == [("UK cases", [("R v Brown", ""), ("Donoghue v Stevenson", "[1932] AC 562")])])
+        check("replace exact text only", lambda: replace_lines(
+            ["Donohue v Stevenson; donohue", "Donohue"], "Donohue", "Donoghue") == (
+            ["Donoghue v Stevenson; donohue", "Donoghue"], 2))
         check("wrap lines", lambda: wrap_starts("hello world foo", 8) == (0, 6, 12))
         check("terminal library", lambda: callable(curses.wrapper))
     for name, ok, err in results:

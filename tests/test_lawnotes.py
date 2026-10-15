@@ -523,6 +523,142 @@ class RevisionTests(unittest.TestCase):
         self.assertNotIn(".revision.json", files)
 
 
+class ReplaceTests(unittest.TestCase):
+    """Find and replace, in a notes folder and history store of its own."""
+
+    def setUp(self):
+        self.saved = lawnotes.NOTES_DIR, lawnotes.HISTORY_DIR
+        self.dir = tempfile.mkdtemp(dir=TMP)
+        lawnotes.NOTES_DIR = os.path.join(self.dir, "notes")
+        lawnotes.HISTORY_DIR = os.path.join(self.dir, "history.git")
+
+    def tearDown(self):
+        lawnotes.NOTES_DIR, lawnotes.HISTORY_DIR = self.saved
+
+    def note(self, rel, text):
+        path = os.path.join(lawnotes.NOTES_DIR, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    def app(self, path):
+        """An App without a screen: enough for replacing, with pick() and ask() answered by the test."""
+        app = object.__new__(lawnotes.App)
+        app.pane = lawnotes.Pane()
+        app.layout = lawnotes.Layout.leaf(app.pane)
+        for a in lawnotes.App.VIEW_ATTRS:
+            setattr(app, a, getattr(app.pane, a))
+        app.buf = lawnotes.Buffer(path)
+        app.history = lawnotes.History()
+        app.search, app.msg, app.msg_until = "", "", 0.0
+        app.save_failed, app.last_save_try, app.recovery_path, app.theme = False, 0.0, None, "NERV"
+        app.draw = lambda refresh=True: None
+        app.picks = []
+        app.pick = lambda title, build, *a, **k: app.picks.append((title, build(""))) or app.choice
+        app.choice = None
+        return app
+
+    def test_replace_lines_and_cursor(self):
+        self.assertEqual(lawnotes.replace_lines(["[1932] AC 532 and [1932] AC 532", "ac 532"], "AC 532", "AC 562"),
+                         (["[1932] AC 562 and [1932] AC 562", "ac 532"], 2))  # capitals must match
+        self.assertEqual(lawnotes.replace_lines(["x"], "y", "z"), (["x"], 0))
+        line = "Donohue v Stevenson; Donohue"
+        self.assertEqual(lawnotes.moved_col(line, 10, "Donohue", "Donoghue"), 11)  # after one match
+        self.assertEqual(lawnotes.moved_col(line, 0, "Donohue", "Donoghue"), 0)    # at a match's start
+        self.assertEqual(lawnotes.moved_col(line, 3, "Donohue", "Donoghue"), 8)    # inside: end of it
+        self.assertEqual(lawnotes.moved_col(line, 28, "Donohue", "D"), 16)          # end of line
+
+    def test_this_note_is_one_undo_step(self):
+        a = self.note("A.md", "Donohue v Stevenson\nper Lord Atkin in Donohue\n")
+        app = self.app(a)
+        b = app.buf
+        b.cy, b.cx = 1, 25
+        app.choice = "note"
+        prompts = iter(["Donohue", "Donoghue"])
+        app.prompt = lambda label, text="": next(prompts)
+        app.replace()
+        self.assertEqual([label for label, _ in app.picks[0][1]][:2],
+                         ["This note — 2 matches", "All notes — 2 matches in 1 note"])
+        self.assertEqual(b.lines, ["Donoghue v Stevenson", "per Lord Atkin in Donoghue"])
+        self.assertEqual((b.cy, b.cx), (1, 26))
+        self.assertEqual(app.search, "Donoghue")                     # the replacements are highlighted
+        b.undo()
+        self.assertEqual(b.lines, ["Donohue v Stevenson", "per Lord Atkin in Donohue"])
+
+    def test_selection_starts_the_prompt(self):
+        a = self.note("Sel.md", "see Caparo v Dickman\n")
+        app = self.app(a)
+        app.anchor, app.buf.cy, app.buf.cx = (0, 4), 0, 10
+        asked = []
+        app.prompt = lambda label, text="": asked.append((label, text))
+        app.replace()
+        self.assertEqual(asked, [("Replace: ", "Caparo")])
+
+    def test_one_at_a_time(self):
+        a = self.note("Review.md", "Donohue and Donohue\nDonohue\nDonohue\n")
+        app = self.app(a)
+        app.buf.cy, app.buf.cx = 2, 3
+        answers, questions = iter(["n", "y", "a"]), []
+        app.ask = lambda q, keys: questions.append((q, app.selection())) or next(answers)
+        app.replace_review("Donohue", "Donoghue", "“Donoghue”")
+        b = app.buf
+        self.assertEqual(b.lines, ["Donohue and Donoghue", "Donoghue", "Donoghue"])
+        self.assertIn("(1 of 4)", questions[0][0])
+        self.assertEqual(questions[1][1], ((0, 12), (0, 19)))        # each match is selected in turn
+        self.assertIsNone(app.anchor)
+        b.undo()                                                     # one ^Z undoes them all
+        self.assertEqual(b.lines, ["Donohue and Donohue", "Donohue", "Donohue"])
+        self.assertEqual((b.cy, b.cx), (2, 3))                       # and goes back to where you were
+        self.assertEqual(app.search, "Donoghue")                     # the replacements were highlighted
+        app.search = "neighbour"
+        answers = iter([None])                                       # Esc at once: nothing changes
+        app.replace_review("Donohue", "Donoghue", "“Donoghue”")
+        self.assertEqual(b.lines, ["Donohue and Donohue", "Donohue", "Donohue"])
+        self.assertEqual(app.search, "neighbour")                    # the find highlight is kept
+
+    def test_all_notes(self):
+        a = self.note("A.md", "Donohue v Stevenson [1932] AC 532\n")
+        bpath = self.note("B.md", "Donohue\n")
+        c = self.note("Tort/C.md", "See Donohue.\nDonohue twice: Donohue\n")
+        d = self.note("ro/D.md", "Donohue\n")
+        untouched = {p: open(p).read() for p in (
+            self.note(".hidden.md", "Donohue\n"), self.note(".themes/Mine.txt", "Donohue\n"),
+            self.note("slides.rtf", "Donohue\n"), self.note("E.md", "donohue\n"))}
+        app = self.app(a)
+        app.buf.cx = 19                                              # after "Stevenson"
+        right = lawnotes.Pane()                                      # B open in a second pane,
+        right.buf = lawnotes.Buffer(bpath)                           # with an unsaved change
+        right.buf.lines.append("Donohue again")
+        right.buf.dirty = True
+        app.layout = lawnotes.Layout("v", lawnotes.Layout.leaf(app.pane), lawnotes.Layout.leaf(right))
+        os.chmod(os.path.dirname(d), 0o500)
+        try:
+            notes = app.notes_containing("Donohue")
+            self.assertEqual(sorted(rel for _, rel, _, _ in notes), ["A.md", "B.md", "Tort/C.md", "ro/D.md"])
+            app.replace_everywhere("Donohue", "Donoghue", notes)
+        finally:
+            os.chmod(os.path.dirname(d), 0o700)
+        self.assertEqual(app.buf.lines, ["Donoghue v Stevenson [1932] AC 532"])
+        self.assertEqual(app.buf.cx, 20)
+        self.assertEqual(open(a).read(), "Donoghue v Stevenson [1932] AC 532\n")  # open notes are saved
+        self.assertEqual(open(bpath).read(), "Donoghue\nDonoghue again\n")
+        self.assertEqual(open(c).read(), "See Donoghue.\nDonoghue twice: Donoghue\n")
+        self.assertEqual(open(d).read(), "Donohue\n")
+        for p, text in untouched.items():
+            self.assertEqual(open(p).read(), text, p)
+        self.assertIn("Replaced 6 in 3 notes", app.msg)
+        title, problems = app.picks[0]
+        self.assertIn("1 couldn't be written", title)
+        self.assertEqual([path for _, path in problems], [d])
+        self.assertTrue(problems[0][0].startswith("ro/D.md — not changed"))
+        right.buf.undo()                                             # ^Z in an open note
+        self.assertEqual(right.buf.lines, ["Donohue", "Donohue again"])
+        h = app.history                                              # ^R has the closed notes as they were
+        self.assertEqual(h.content(h.versions(c)[0][0], c), "See Donohue.\nDonohue twice: Donohue\n")
+        self.assertEqual(sorted(os.listdir(os.path.dirname(c))), ["C.md"])  # no conflict or temp files
+
+
 @unittest.skipUnless(lawnotes.find_tool("pandoc"), "export needs pandoc (brew install pandoc)")
 class ExportTests(unittest.TestCase):
     NOTE = [
@@ -1112,6 +1248,43 @@ class SessionTests(unittest.TestCase):
                 os.remove(settings)
             else:
                 open(settings, "w").write(before)
+
+
+    def test_replace_in_all_notes(self):
+        folder = os.path.join(lawnotes.NOTES_DIR, "Replace")
+        os.makedirs(folder, exist_ok=True)
+        a, b = os.path.join(folder, "A.md"), os.path.join(folder, "B.md")
+        open(a, "w").write("Donohoe v Stevenson\n")
+        open(b, "w").write("Donohoe [1932] AC 562\n")
+        s = Session(a)
+        s.keys(b"\x1br", 0.5)                                    # Option+R
+        s.keys(b"Donohoe\r", 0.4)
+        screen = s.keys(b"Donoghue\r", 0.8)
+        self.assertIn("All notes — 2 matches in 2 notes", screen)
+        screen = s.keys(b"\x1b[B\r", 1.5)                         # All notes
+        self.assertIn("2 in 2 notes ·", screen)                    # "Replaced 2 in 2 notes"
+        self.assertEqual(open(b).read(), "Donoghue [1932] AC 562\n")
+        s.keys(b"\x1a\x13", 0.5)                                  # ^Z undoes it in the open note
+        self.assertTrue(s.quit())
+        self.assertEqual(open(a).read(), "Donohoe v Stevenson\n")
+        self.assertEqual(open(b).read(), "Donoghue [1932] AC 562\n")
+
+    def test_replace_one_at_a_time(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Review.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("Smyth v Jones; Smyth again; Smyth\n")
+        s = Session(note)
+        s.keys(b"\x1bOS", 0.5)                                    # F4
+        s.keys(b"Smyth\rSmith\r", 0.8)
+        screen = s.keys(b"\x1b[B\x1b[B\r", 0.8)                  # One at a time
+        self.assertIn("(1 of 3)", screen)
+        s.keys(b"n", 0.4)
+        s.keys(b"y", 0.4)
+        screen = s.keys(b"\x1b", 0.8)                             # Esc stops
+        self.assertIn("Replaced 1 of 3", screen)
+        s.keys(b"\x13", 0.5)
+        self.assertTrue(s.quit())
+        self.assertEqual(open(note).read(), "Smyth v Jones; Smith again; Smyth\n")
 
     def test_history_snapshots_notes_only(self):
         d = os.path.join(lawnotes.NOTES_DIR, "Hist")
