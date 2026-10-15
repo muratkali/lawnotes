@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.6.0
+
+- Revision cards (Option+C or F7): each case brief becomes a card (the case and citation on the front, the brief on the back), and so does a bullet that names a case and says something about it. Choose this note, its folder or all notes; Space shows the answer, then 1 again, 2 hard, 3 good. Cards due come first and come back after 1, 3, 7, 14, 30, then 60 days. Progress is kept in UCL Notes → .revision.json, so every Mac shares it, and revising on two Macs before iCloud syncs loses nothing.
+- Links between notes: type `[[` and pick a note to write `[[Folder/Name]]` (add `#Heading` to go to a heading, `|other words` to show other words; a bare `[[Name]]` works when only one note has that name). Option+L on a link opens that note, or creates it if it doesn't exist yet; anywhere else it lists the notes linking here. Links are underlined in their own theme colour and dimmed when the note doesn't exist; exports show them as plain text.
+- Find and replace (Option+R or F4), e.g. Donohue → Donoghue or [1932] AC 532 → [1932] AC 562: it starts with the selected text or your ^F search, then choose this note, all notes, or one match at a time (y replace, n skip, a all the rest, Esc stop). Capitals must match exactly. ^Z undoes it in an open note; before other notes change, a version is saved so ^R can restore them, and any note that couldn't be written is listed.
+- Export with tables of cases and legislation, for essays and coursework: Option+E (or F5) now also offers Word or PDF "with tables of cases and legislation" (`lawnotes --export NOTE docx --tables` from a terminal). An OSCOLA Table of Cases (sorted by the first significant name, so R v Brown is under B; one entry per case, with its citation when the note gives one; UK, EU, Strasbourg and other cases apart when the citation shows which) and a Table of Legislation (Acts by title, EU treaties with their articles, the European Convention) follow the title, and in Word the note starts on a new page. Comments are left out, and the note itself isn't changed.
+
 ## 1.5.3
 
 - Case names, law reports and Acts are highlighted in full when the notes write them out: a second “v”, “ex parte” and “Re … (No 1)”; reports such as [2005] 2 A.C. 373, (1870-71) LR 6 Ch App 597, 45 ER 1184 and 161 A2d 69; and statute titles such as “Occupiers Liability Act of 1957”, “Trusts (Jersey) Law 1984”, LPA 1925, Schedule 1 and the European Convention.
