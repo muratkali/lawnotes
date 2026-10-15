@@ -950,9 +950,10 @@ def find_tool(name):
     return shutil.which(name, path=os.pathsep.join([os.environ.get("PATH", "")] + extra))
 
 
-def export_markdown(lines):
+def export_markdown(lines, tables=False):
     """A note as Markdown for pandoc: case names in italics (OSCOLA), and indented lines that
-    aren't part of a list kept as text (Markdown would otherwise turn them into code blocks)."""
+    aren't part of a list kept as text (Markdown would otherwise turn them into code blocks).
+    With tables, a Table of Cases and a Table of Legislation follow the title (the first # heading)."""
     out, in_list = [], False  # in_list: the last non-blank line belongs to a list
     for line in lines:
         if COMMENT_RE.search(line):  # comments are notes to yourself: not exported
@@ -974,7 +975,122 @@ def export_markdown(lines):
             line = CASE_RE.sub(lambda m: m.group() if line[max(0, m.start() - 1):m.start()] in ("*", "_")
                                else f"*{m.group()}*", line)
         out.append(line)
+    if tables:
+        title = next((i + 1 for i, line in enumerate(out) if line.startswith("# ")), 0)
+        found = authorities(lines)
+        if any(found.values()):
+            out[title:title] = ["", tables_markdown(found), PAGE_BREAK, ""]
     return "\n".join(out) + "\n"
+
+
+# --- Tables of cases and legislation (OSCOLA) ----------------------------------
+
+# OSCOLA (4th ed, 1.7) lists cases by the first significant word of the name, so "R v", "Re",
+# "In re" and "The" at the start are skipped when sorting; the entry keeps them.
+_SORT_SKIP = re.compile(r"(?:(?:R|Rex|Regina)\s+v\.?\s+|(?:In\s+)?[Rr]e\s+|The\s+)+")
+# Where a case was decided, as its report shows; an uncited case can't be placed, so it is
+# listed with the UK cases.
+_EU_REPORT = re.compile(r"\bECR\b|\bCMLR\b|\bEU:[CT]:")
+_ECHR_REPORT = re.compile(r"\bEHRR\b|\bECHR\b")
+_US_REPORT = re.compile(r"\b(?:US|NY|NJ|S\.?\s?Ct\.?|F\.?\s?(?:[234]d|Supp\.?)|A\.?\s?[23]d|N\.?\s?[EW]\.?(?:\s?[23]d)?"
+                        r"|So\.?\s?[23]d|P\.?\s?[23]d)\s+\d|\([A-Z][a-z]+\.\s+\d{4}\)")
+TREATIES = {"TEU": "Treaty on European Union (TEU)",
+            "TFEU": "Treaty on the Functioning of the European Union (TFEU)"}
+ECHR_TITLE = "Convention for the Protection of Human Rights and Fundamental Freedoms (European Convention on Human Rights)"
+# A Word page break between the tables and the note (other formats ignore it)
+PAGE_BREAK = '\n```{=openxml}\n<w:p><w:r><w:br w:type="page"/></w:r></w:p>\n```\n'
+
+
+def _sort_key(name):
+    skip = _SORT_SKIP.match(name)
+    name = name[skip.end():] if skip else name
+    return re.sub(r"[^\w\s]", "", name).lower().split()
+
+
+def _initials(title):
+    """Law Reform (Contributory Negligence) Act → LR(CN)A, to recognise LR(CN)A 1945 in a note."""
+    return re.sub(r"[^A-Z()]", "", re.sub(r"\b([A-Z])[\w'’-]*", r"\1", title))
+
+
+def authorities(lines):
+    """The cases and legislation a note cites (comments left out), sorted for its tables.
+    A case cited several times is listed once, with the citation if the note gives one."""
+    cases, acts, other, treaties, conventions, short = {}, {}, {}, {}, {}, []
+    for line in lines:
+        line = COMMENT_RE.sub("", line)
+        for m in CASE_RE.finditer(line):
+            name = re.sub(r"\bv\.(?=\s)", "v", " ".join(m.group().split()))  # OSCOLA: no full stops
+            c = cases.setdefault(name.lower().replace("’", "'"), [name, ""])
+            if not c[1]:  # the first cited form wins (as in the case index)
+                rest = line[m.end():]
+                cm = CITE_RE.match(line, m.end() + len(rest) - len(rest.lstrip(" ,*_")))
+                if cm:
+                    cite = " ".join(cm.group().split())
+                    c[:] = [name, re.sub(r"\b(?:[A-Z]\.){2,}", lambda d: d.group().replace(".", ""), cite)]  # A.C. → AC
+        for m in STATUTE_RE.finditer(line):
+            text = " ".join(m.group().split())
+            treaty = re.search(rf"\b{_TREATY}$", text)
+            if treaty:
+                refs = treaties.setdefault(treaty.group(), [])
+                ref = re.sub(r"(?<=[\d)])\s\(", "(", re.sub(r"^[A-Za-z]+\.?\s?|\s*\b(?:TEU|TFEU)$", "", text))
+                if ref and ref not in refs:
+                    refs.append(ref)
+            elif re.fullmatch(r"(?:European|EU)\s+Convention.*", text):
+                if re.fullmatch(r"(?:European|EU) Convention(?: (?:of|for|on) (?:the )?(?:Protection of )?(?:Human Rights|PHR).*)?", text):
+                    text = ECHR_TITLE
+                conventions.setdefault(text.lower(), text)
+            elif re.fullmatch(r"[A-Z]{2,8}(?:\([A-Z]{1,4}\))?A \d{4}", text):
+                short.append(text)
+            elif re.search(r"\b(?:Act|Law) (?:of )?\d{4}$", text):
+                text = re.sub(r"^The ", "", re.sub(r" of (\d{4})$", r" \1", text))
+                into = acts if " Act " in f" {text} " else other  # "Trusts (Jersey) Law 1984" isn't a UK Act
+                into.setdefault(re.sub(r"['’]", "", text).lower(), text)
+    for text in short:  # LPA 1925: listed under the Act's full title if the note gives it
+        abbrev, year = text.split(" ")
+        if not any(t.endswith(" " + year) and _initials(t[:-5]) == abbrev for t in acts.values()):
+            acts.setdefault(text.lower(), text)
+
+    groups = {"UK cases": [], "EU cases": [], "European Court of Human Rights": [], "Cases from other jurisdictions": []}
+    for name, cite in cases.values():
+        where = ("EU cases" if _EU_REPORT.search(cite) else
+                 "European Court of Human Rights" if _ECHR_REPORT.search(cite)
+                 or re.search(r" v (?:United Kingdom|UK)$", name) else
+                 "Cases from other jurisdictions" if _US_REPORT.search(cite) else "UK cases")
+        groups[where].append((name, cite))
+    for g in groups.values():
+        g.sort(key=lambda c: (_sort_key(c[0]), c[0]))
+
+    def art(refs):
+        refs = sorted(refs, key=lambda r: (int(re.match(r"\d*", r).group() or 0), r))
+        many = len(refs) > 1 or re.search(r",|\s(?:and|or|to)\s|[–-]", refs[0])
+        return ("arts " if many else "art ") + ", ".join(refs)
+
+    return {
+        "cases": [(g, items) for g, items in groups.items() if items],
+        "legislation": [(g, items) for g, items in (
+            ("UK statutes", sorted(acts.values(), key=_sort_key)),
+            ("Other legislation", sorted(other.values(), key=_sort_key)),
+            ("EU treaties", [TREATIES[t] + (" " + art(refs) if refs else "")
+                             for t, refs in sorted(treaties.items(), key=lambda t: t[0] != "TEU")]),
+            ("Treaties and conventions", sorted(conventions.values(), key=_sort_key))) if items],
+    }
+
+
+def tables_markdown(found):
+    """The Table of Cases and Table of Legislation as Markdown. Case names are in roman: OSCOLA
+    italicises them in the text and footnotes, but not in tables of cases."""
+    esc = lambda s: re.sub(r"([\\`*_\[\]<>~^=#|])", r"\\\1", s)
+    out = []
+    for title, groups in (("Table of Cases", found["cases"]), ("Table of Legislation", found["legislation"])):
+        if not groups:
+            continue
+        out += ["## " + title, ""]
+        for heading, items in groups:
+            if len(groups) > 1:
+                out += ["### " + heading, ""]
+            out += [esc(" ".join(x for x in item if x) if isinstance(item, tuple) else item) for item in items]
+            out.append("")
+    return "\n".join(out)
 
 
 def compiled_helper(name):
@@ -1024,15 +1140,16 @@ def reference_docx(pandoc):
     return path
 
 
-def export_note(path, lines, fmt):
-    """Write the note as .docx or .pdf into EXPORT_DIR; returns the new file's path."""
+def export_note(path, lines, fmt, tables=False):
+    """Write the note as .docx or .pdf into EXPORT_DIR; returns the new file's path.
+    With tables, a Table of Cases and a Table of Legislation follow the title."""
     pandoc = find_tool("pandoc")
     if not pandoc:
         raise ExportError("export needs pandoc: run  brew install pandoc  (free)")
     name = os.path.splitext(os.path.basename(path))[0]
     os.makedirs(EXPORT_DIR, exist_ok=True)
     out = os.path.join(EXPORT_DIR, f"{name}.{fmt}")
-    text = export_markdown(lines)
+    text = export_markdown(lines, tables)
     # each line of a note stays a line; no "simple tables", which plain notes trigger by accident
     source = "markdown+hard_line_breaks+mark-simple_tables-multiline_tables"  # ==text== highlights
     if fmt == "docx":
@@ -1409,7 +1526,7 @@ HELP = [
     ("^K", "Cut the line (press repeatedly to cut several lines)."),
     ("^U", "Paste the cut lines above the cursor."),
     ("^Z  ^Y", "Undo / redo. Undo also brings back a selection you clicked or moved away from."),
-    ("Option+E", "Export the note to Word (.docx) or PDF, into Downloads. Case names are put in italics (OSCOLA), [^1] footnotes become real footnotes. F5 does the same."),
+    ("Option+E", "Export the note to Word (.docx) or PDF, into Downloads. Case names are put in italics (OSCOLA), [^1] footnotes become real footnotes. F5 does the same. For an essay, pick “with tables of cases and legislation”: OSCOLA tables after the title, then a new page."),
     ("^R", "Version history: snapshots of your notes are taken automatically every few minutes while you work. Pick one to restore it (^Z undoes the restore)."),
     ("#", "Formatting (Markdown)"),
     ("# Title", "Heading;  ## Section  for a subheading."),
@@ -2798,18 +2915,23 @@ class App:
     def export(self):
         choice = self.pick("Export this note — saved to " + EXPORT_DIR.replace(os.path.expanduser("~"), "~", 1),
                            lambda q: [(label, fmt) for label, fmt in (
-                               ("Word document (.docx) — footnotes stay footnotes", "docx"),
-                               ("PDF (A4, Times 12, footnotes as endnotes)", "pdf"))
+                               ("Word document (.docx) — footnotes stay footnotes", ("docx", False)),
+                               ("PDF (A4, Times 12, footnotes as endnotes)", ("pdf", False)),
+                               ("Word (.docx) with tables of cases and legislation — for essays", ("docx", True)),
+                               ("PDF with tables of cases and legislation — for essays", ("pdf", True)))
                                if q.lower() in label.lower()])
         if not choice:
             return
+        fmt, tables = choice
         self.safe_save()
         self.say("Exporting…", 30)
         self.draw()
         try:
-            out = export_note(self.buf.path, self.buf.lines, choice)
-            self.say("Exported to " + out.replace(os.path.expanduser("~"), "~", 1), 10)
-            log(f"exported {os.path.basename(self.buf.path)} as {choice}")
+            out = export_note(self.buf.path, self.buf.lines, fmt, tables)
+            none = tables and not any(authorities(self.buf.lines).values())
+            self.say("Exported to " + out.replace(os.path.expanduser("~"), "~", 1)
+                     + (" (no cases or legislation found for the tables)" if none else ""), 10)
+            log(f"exported {os.path.basename(self.buf.path)} as {fmt}{' with tables' * tables}")
         except (ExportError, OSError, subprocess.SubprocessError) as e:
             self.say(f"Export failed: {e}", 12)
 
@@ -3567,6 +3689,8 @@ def self_test():
         check("keep spaces in pasted citations", lambda: clean_text("v\u00a0Stevenson") == "v Stevenson")
         check("find case names", lambda: [m.group() for m in CASE_RE.finditer(
             "Lord Atkin in Donoghue v Stevenson")] == ["Donoghue v Stevenson"])
+        check("build a table of cases", lambda: authorities(["R v Brown; Donoghue v Stevenson [1932] AC 562"])["cases"]
+              == [("UK cases", [("R v Brown", ""), ("Donoghue v Stevenson", "[1932] AC 562")])])
         check("wrap lines", lambda: wrap_starts("hello world foo", 8) == (0, 6, 12))
         check("terminal library", lambda: callable(curses.wrapper))
     for name, ok, err in results:
@@ -3581,12 +3705,12 @@ def main():
     if args and args[0] == "--self-test":
         sys.exit(self_test())
     if args and args[0] == "--export":
-        if len(args) != 3 or args[2] not in ("docx", "pdf"):
-            print("usage: lawnotes --export NOTE docx|pdf", file=sys.stderr)
+        if len(args) not in (3, 4) or args[2] not in ("docx", "pdf") or args[3:] not in ([], ["--tables"]):
+            print("usage: lawnotes --export NOTE docx|pdf [--tables]", file=sys.stderr)
             sys.exit(2)
         try:
             note = resolve_note(args[1])
-            print(export_note(note, Buffer(note).lines, args[2]))
+            print(export_note(note, Buffer(note).lines, args[2], tables=len(args) == 4))
         except (ExportError, ValueError, OSError) as e:
             print(f"lawnotes: {e}", file=sys.stderr)
             sys.exit(1)

@@ -212,6 +212,70 @@ class TextTests(unittest.TestCase):
                      "European Convention for PHR"):
             whole(lawnotes.STATUTE_RE, text)
 
+    # An essay as the notes write it: citations in the forms of CHANGELOG 1.5.0 and 1.5.3
+    ESSAY = [
+        "# Duty of Care in Negligence",
+        "",
+        "Lord Atkin in Donoghue v Stevenson set out the neighbour principle.  // check the HL report",
+        "- Donoghue v Stevenson [1932] AC 562 (HL): the snail in the bottle",
+        "- Caparo Industries plc v Dickman [1990] 2 A.C. 605, three-stage test; *R v Brown* [1994] 1 AC 212",
+        "- Re Baden’s Deed Trusts (No 2) and Re Adams and the Kensington Vestry",
+        "- Henningsen v. Bloomfield Motors, Inc. 161 A2d 69 (1960)",
+        "- Leigh v Sillavan Ltd v Aliakmon Shipping Co Ltd (The Aliakmon) [1986] 1 AC 785",
+        "- Costa v ENEL [1964] ECR 585; Osman v United Kingdom (2000) 29 EHRR 245",
+        "// Fake v Case [2000] 1 AC 1 is only a comment",
+        "",
+        "## Statute",
+        "s 2(1) of the Human Rights Act 1998, the Occupiers Liability Act of 1957 and LPA 1925.",
+        "Law of Property Act 1925; The Law Reform (Contributory Negligence) Act of 1945; TLATA 1996.",
+        "Trusts (Jersey) Law 1984. Articles 49 and 50 TEU; Art. 3 (5) TEU; Art. 21 (1) and (2) TEU.",
+        "Article 267 TFEU and the European Convention for the Protection of Human Rights.",
+    ]
+
+    def test_tables_of_cases_and_legislation(self):
+        found = lawnotes.authorities(self.ESSAY)
+        self.assertEqual(found["cases"], [
+            ("UK cases", [
+                ("Re Adams and the Kensington Vestry", ""),          # sorted under A: "Re" is skipped
+                ("Re Baden’s Deed Trusts (No 2)", ""),
+                ("R v Brown", "[1994] 1 AC 212"),                     # under B: "R v" is skipped
+                ("Caparo Industries plc v Dickman", "[1990] 2 AC 605"),  # OSCOLA: no full stops
+                ("Donoghue v Stevenson", "[1932] AC 562 (HL)"),      # once, in its cited form
+                ("Leigh v Sillavan Ltd v Aliakmon Shipping Co Ltd (The Aliakmon)", "[1986] 1 AC 785"),
+            ]),
+            ("EU cases", [("Costa v ENEL", "[1964] ECR 585")]),
+            ("European Court of Human Rights", [("Osman v United Kingdom", "(2000) 29 EHRR 245")]),
+            ("Cases from other jurisdictions", [("Henningsen v Bloomfield Motors, Inc.", "161 A2d 69 (1960)")]),
+        ])
+        self.assertEqual(found["legislation"], [
+            ("UK statutes", ["Human Rights Act 1998", "Law of Property Act 1925",  # LPA 1925 is this Act
+                             "Law Reform (Contributory Negligence) Act 1945",
+                             "Occupiers Liability Act 1957", "TLATA 1996"]),     # no full title to match
+            ("Other legislation", ["Trusts (Jersey) Law 1984"]),
+            ("EU treaties", ["Treaty on European Union (TEU) arts 3(5), 21(1) and (2), 49 and 50",
+                             "Treaty on the Functioning of the European Union (TFEU) art 267"]),
+            ("Treaties and conventions", [lawnotes.ECHR_TITLE]),
+        ])
+        self.assertEqual(lawnotes._sort_key("The Moorcock"), ["moorcock"])
+        self.assertEqual(lawnotes._sort_key("R v Deputy Governor of Parkhurst Prison, Ex parte Hague")[:2], ["deputy", "governor"])
+        self.assertEqual(lawnotes.authorities(["Duty of care // see Caparo v Dickman", "no authority here"]),
+                         {"cases": [], "legislation": []})
+
+    def test_tables_go_after_the_title(self):
+        md = lawnotes.export_markdown(self.ESSAY, tables=True)
+        body = md.index("Lord Atkin in *Donoghue v Stevenson*")
+        self.assertLess(md.index("# Duty of Care"), md.index("## Table of Cases"))
+        self.assertLess(md.index("## Table of Cases"), md.index("## Table of Legislation"))
+        self.assertLess(md.index('<w:br w:type="page"/>'), body)              # a new page for the essay
+        self.assertIn("\nDonoghue v Stevenson \\[1932\\] AC 562 (HL)\n", md)   # roman in the table (OSCOLA)
+        self.assertIn("\nR v Brown \\[1994\\] 1 AC 212\n", md)
+        self.assertNotIn("Fake v Case", md)                                     # comments stay out
+        self.assertEqual(md[body:], lawnotes.export_markdown(self.ESSAY)[lawnotes.export_markdown(self.ESSAY).index(
+            "Lord Atkin"):])                                                    # the note itself unchanged
+        self.assertEqual(lawnotes.export_markdown(["Duty of care", "Breach"], tables=True), "Duty of care\nBreach\n")
+        untitled = lawnotes.export_markdown(["Donoghue v Stevenson applies"], tables=True)
+        self.assertTrue(untitled.startswith("\n## Table of Cases\n\nDonoghue v Stevenson\n"))  # no title: first
+
     def test_theme_files(self):
         for name, palette in lawnotes.THEMES.items():
             self.assertEqual(lawnotes.parse_theme(lawnotes.theme_text(name, palette)), (palette, []), name)
@@ -407,6 +471,40 @@ class ExportTests(unittest.TestCase):
         self.assertRegex(doc, r'<w:highlight w:val="yellow" ?/>')
         self.assertIn("ratio decidendi", doc)
         self.assertNotIn("==", doc)
+
+    def test_word_with_tables(self):
+        import zipfile
+        path = lawnotes.export_note(os.path.join(TMP, "Essay.md"), TextTests.ESSAY, "docx", tables=True)
+        doc = zipfile.ZipFile(path).read("word/document.xml").decode()
+        order = [doc.index(t) for t in ("Duty of Care in Negligence", "Table of Cases", "UK cases",
+                                        "Re Adams and the Kensington Vestry", "Table of Legislation",
+                                        "Human Rights Act 1998", '<w:br w:type="page"', "Lord Atkin in")]
+        self.assertEqual(order, sorted(order))                 # title, tables, page break, then the note
+        self.assertNotIn("Fake v Case", doc)
+        plain = lawnotes.export_note(os.path.join(TMP, "Essay.md"), TextTests.ESSAY, "docx")
+        self.assertNotIn("Table of Cases", zipfile.ZipFile(plain).read("word/document.xml").decode())
+
+    def test_pdf_with_tables(self):
+        path = lawnotes.export_note(os.path.join(TMP, "Essay.md"), TextTests.ESSAY, "pdf", tables=True)
+        self.assertTrue(open(path, "rb").read().startswith(b"%PDF"))
+
+    def test_export_menu_offers_tables(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Essay.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("\n".join(TextTests.ESSAY) + "\n")
+        s = Session(note, env={"LAWNOTES_EXPORT_DIR": self.out})
+        screen = s.keys(b"\x1b[15~", 0.6)                                       # F5
+        self.assertIn("with tables of cases and legislation", screen)
+        s.keys(b"Word (.docx) with\r", 0.3)
+        out = os.path.join(self.out, "Essay.docx")
+        for _ in range(100):
+            if os.path.exists(out):
+                break
+            s.out += s.read(0.1)
+        self.assertTrue(s.quit())
+        import zipfile
+        self.assertIn("Table of Legislation", zipfile.ZipFile(out).read("word/document.xml").decode())
+        self.assertEqual(open(note).read(), "\n".join(TextTests.ESSAY) + "\n")  # the note isn't changed
 
     def test_markdown_preparation(self):
         md = lawnotes.export_markdown(self.NOTE).split("\n")
