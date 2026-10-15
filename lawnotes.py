@@ -182,32 +182,35 @@ THEMES = {
         "statute": (119, 52), "bullet": (141, 52), "quote": (181, 52), "match": (16, 208),
         "bar": (230, 88), "key": (16, 208), "dim": (174, 52), "sel": (16, 208), "spell": (231, 160),
         "party_D": (16, 214), "party_V": (16, 218), "party_C": (16, 117), "copied": (16, 120),
-        "bar_off": (181, 88), "comment": (16, 229), "mark": (16, 226),
+        "bar_off": (181, 88), "comment": (16, 229), "mark": (16, 226), "link": (81, 52),
     },
     "Unit-01": {  # Evangelion Unit-01: deep purple with acid green
         "text": (194, 54), "h1": (118, 54), "h": (154, 54), "case": (191, 54), "cite": (183, 54),
         "statute": (214, 54), "bullet": (118, 54), "quote": (189, 54), "match": (16, 214),
         "bar": (16, 112), "key": (16, 118), "dim": (140, 54), "sel": (16, 118), "spell": (231, 160),
         "party_D": (16, 214), "party_V": (16, 218), "party_C": (16, 117), "copied": (16, 120),
-        "bar_off": (189, 91), "comment": (16, 229), "mark": (16, 226),
+        "bar_off": (189, 91), "comment": (16, 229), "mark": (16, 226), "link": (81, 54),
     },
     "Paper": {  # light: dark ink on cream, for daylight
         "text": (235, 230), "h1": (124, 230), "h": (130, 230), "case": (94, 230), "cite": (125, 230),
         "statute": (28, 230), "bullet": (91, 230), "quote": (242, 230), "match": (16, 220),
         "bar": (230, 124), "key": (231, 124), "dim": (244, 230), "sel": (231, 25), "spell": (231, 160),
         "party_D": (16, 214), "party_V": (16, 218), "party_C": (16, 117), "copied": (16, 120),
-        "bar_off": (238, 252), "comment": (16, 229), "mark": (16, 226),
+        "bar_off": (238, 252), "comment": (16, 229), "mark": (16, 226), "link": (25, 230),
     },
 }
 # The names theme files use, in the order New theme writes them
 THEME_ROLES = [
     ("text", "text"), ("title", "h1"), ("headings", "h"), ("case-names", "case"), ("citations", "cite"),
-    ("statutes", "statute"), ("bullets", "bullet"), ("quotes", "quote"), ("hints", "dim"),
+    ("statutes", "statute"), ("bullets", "bullet"), ("quotes", "quote"), ("links", "link"), ("hints", "dim"),
     ("comments", "comment"), ("highlights", "mark"), ("misspelt", "spell"), ("selection", "sel"),
     ("search", "match"), ("copied", "copied"), ("keys", "key"), ("status-bar", "bar"),
     ("status-bar-other-panes", "bar_off"), ("party-d", "party_D"), ("party-v", "party_V"),
     ("party-c", "party_C"),
 ]
+# Roles added after theme files were already in use, and which of the file's own colours to use
+# instead when its background isn't NERV's (NERV's colour could be unreadable on it)
+LATER_ROLES = {"link": "h"}
 _CUBE = (0, 95, 135, 175, 215, 255)
 _ANSI = [(0, 0, 0), (205, 0, 0), (0, 205, 0), (205, 205, 0), (0, 0, 238), (205, 0, 205), (0, 205, 205),
          (229, 229, 229), (127, 127, 127), (255, 0, 0), (0, 255, 0), (255, 255, 0), (92, 92, 255),
@@ -280,6 +283,9 @@ def parse_theme(text):
         if role in entries:
             fg, bg = entries[role][0], entries[role][1] if entries[role][1] is not None else bg
         palette[role] = (fg, bg)
+    for role, like in LATER_ROLES.items():
+        if role not in entries and background not in (None, base["text"][1]):
+            palette[role] = (palette[like][0], palette[role][1])
     return palette, problems
 
 

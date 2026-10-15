@@ -224,6 +224,17 @@ class TextTests(unittest.TestCase):
         self.assertEqual(problems, ["line 5: unknown name “bogus”",
                                     "line 6: “#zzz” isn't a colour: use #rrggbb or a number 0–255"])
 
+    def test_older_theme_files_get_a_link_colour(self):
+        for name in lawnotes.THEMES:
+            self.assertIn("link", lawnotes.THEMES[name], name)
+        def without_links(name):
+            text = lawnotes.theme_text("Old", lawnotes.THEMES[name])
+            return "".join(l for l in text.splitlines(True) if not l.startswith("links ="))
+        palette, problems = lawnotes.parse_theme(without_links("NERV"))   # a theme file from before links
+        self.assertEqual((palette["link"], problems), (lawnotes.THEMES["NERV"]["link"], []))
+        palette, problems = lawnotes.parse_theme(without_links("Paper"))  # light: NERV's colour would be unreadable
+        self.assertEqual((palette["link"], problems), ((lawnotes.THEMES["Paper"]["h"][0], 230), []))
+
     def test_spelling_preview_and_next_suggestion(self):
         class Speller:
             state = "ready"
