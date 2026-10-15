@@ -235,6 +235,52 @@ class TextTests(unittest.TestCase):
         palette, problems = lawnotes.parse_theme(without_links("Paper"))  # light: NERV's colour would be unreadable
         self.assertEqual((palette["link"], problems), ((lawnotes.THEMES["Paper"]["h"][0], 230), []))
 
+    def test_links_find_their_note(self):
+        index = lawnotes.link_index(["Tort/Negligence.md", "Contract/Offer.md", "Land/Offer.md", "Index.md",
+                                     "Misc/Old.txt", os.path.join("Tort", "Duty", "Breach.md")])
+        find = lambda t: lawnotes.link_matches(t, index)
+        self.assertEqual(find("Tort/Negligence"), ["Tort/Negligence.md"])
+        self.assertEqual(find("tort/negligence "), ["Tort/Negligence.md"])      # any case, spaces trimmed
+        self.assertEqual(find("Negligence"), ["Tort/Negligence.md"])            # bare name: the only one
+        self.assertEqual(find("Breach"), [os.path.join("Tort", "Duty", "Breach.md")])
+        self.assertEqual(find("Offer"), ["Contract/Offer.md", "Land/Offer.md"])  # two: ambiguous
+        self.assertEqual(find("Land/Offer"), ["Land/Offer.md"])
+        self.assertEqual(find("Index"), ["Index.md"])
+        self.assertEqual(find("Misc/Old"), ["Misc/Old.txt"])
+        self.assertEqual(find("Tort/Missing"), [])
+        self.assertEqual(find("Missing"), [])
+        self.assertEqual(lawnotes.link_name(os.path.join("Tort", "Negligence.md")), "Tort/Negligence")
+
+    def test_link_syntax_and_export(self):
+        line = "See [[Tort/Negligence#Duty of care|the duty]], [[Offer]] and [[Tort/Duty/Breach#Standard]]."
+        self.assertEqual([m.groups() for m in lawnotes.LINK_RE.finditer(line)], [
+            ("Tort/Negligence", "Duty of care", "the duty"), ("Offer", None, None),
+            ("Tort/Duty/Breach", "Standard", None)])
+        self.assertEqual([m.group() for m in lawnotes.LINK_RE.finditer("[[ ]] [x] [[]] [[a]")], [])
+        md = lawnotes.export_markdown([line, "# [[Tort/Negligence]]", "[[Cases|Donoghue v Stevenson]] applies"])
+        self.assertEqual(md.split("\n")[:3], ["See the duty, Offer and Breach.", "# Negligence",
+                                              "*Donoghue v Stevenson* applies"])  # shown text italicised as a case
+
+    def test_link_highlight_and_hint(self):
+        roles = ["text", "h1", "h", "case", "cite", "statute", "bullet", "quote", "mark", "comment", "link",
+                 "dim", "party_D", "party_V", "party_C"]
+        app = object.__new__(lawnotes.App)
+        app.A = {r: (n + 1) << 8 for n, r in enumerate(roles)}
+        app._hl, app.italic = {}, 0
+        app._links = (time.time() + 60, lawnotes.link_index(["Tort/Negligence.md"]))
+        line = "a [[Negligence]] b [[Nowhere]]"
+        attrs = app.highlight(line)
+        self.assertEqual(attrs[2], app.A["link"])
+        self.assertEqual(attrs[19], app.A["dim"])      # no such note: dimmed
+        self.assertEqual(attrs[0], app.A["text"])
+        app.buf = lawnotes.Buffer(os.path.join(TMP, "Hint.md"))
+        app.buf.lines, app.buf.cy, app.buf.cx = [line], 0, 16      # just after the first link
+        self.assertEqual(app.link_hint(), "→ Tort/Negligence   Option+L opens it")
+        app.buf.cx = 22
+        self.assertEqual(app.link_hint(), "No note “Nowhere” yet   Option+L creates it")
+        app.buf.cx = 17
+        self.assertIsNone(app.link_hint())
+
     def test_spelling_preview_and_next_suggestion(self):
         class Speller:
             state = "ready"
@@ -418,6 +464,16 @@ class ExportTests(unittest.TestCase):
         self.assertRegex(doc, r'<w:highlight w:val="yellow" ?/>')
         self.assertIn("ratio decidendi", doc)
         self.assertNotIn("==", doc)
+
+    def test_links_export_as_plain_text(self):
+        import zipfile
+        path = lawnotes.export_note(os.path.join(TMP, "Links.md"),
+                                    ["See [[Tort/Negligence#Duty|the duty of care]] and [[Contract/Offer]]."], "docx")
+        doc = zipfile.ZipFile(path).read("word/document.xml").decode()
+        self.assertIn("the duty of care", doc)
+        self.assertIn("Offer", doc)
+        self.assertNotIn("[[", doc)
+        self.assertNotIn("Contract/", doc)
 
     def test_markdown_preparation(self):
         md = lawnotes.export_markdown(self.NOTE).split("\n")
@@ -738,6 +794,34 @@ class SessionTests(unittest.TestCase):
         s.keys(b"\x13", 0.4)
         self.assertTrue(s.quit())
         self.assertEqual(open(note).read(), "  - alpha\n  - beta\n\n  - gamma\n- delta\n")
+
+    def test_links_between_notes(self):
+        folder = os.path.join(lawnotes.NOTES_DIR, "Linked")
+        os.makedirs(folder, exist_ok=True)
+        source, target = os.path.join(folder, "Source.md"), os.path.join(folder, "Target.md")
+        open(target, "w").write("# Target\n\nintro\n\n## Duty of care\n\nneighbour\n")
+        open(source, "w").write("see \n[[Linked/Target#duty of care|the duty]]\n[[Linked/Missing]]\n")
+        s = Session(source)
+        screen = s.keys(b"\x05[[", 0.6)                      # [[ opens the note list
+        self.assertIn("Link to a note", screen)
+        screen = s.keys(b"Linked/Targ\r", 0.6)               # pick a note: its name and ]] are written
+        self.assertIn("[[Linked/Target]]", screen)
+        s.keys(b" [[", 0.6)
+        s.keys(b"\x1b", 0.6)                                 # Esc leaves the [[ as typed
+        s.keys(b"\x1bOB\x01\x1bl", 0.8)                      # Option+L on a link with a heading
+        s.keys(b"X\x13", 0.5)                                # ...lands on that heading in Target
+        screen = s.keys(b"\x1bl", 0.8)                        # off a link: the notes linking here
+        self.assertIn("Notes linking here", screen)
+        self.assertIn("Source.md:2", screen)
+        s.keys(b"\r", 0.6)                                   # the first: Source, line 1, at the link
+        s.keys(b"Y\x13", 0.5)
+        s.keys(b"\x1bOB\x1bOB\x01\x1bl", 0.8)                # a link to a note that doesn't exist yet
+        s.keys(b"\r", 0.8)                                   # Enter creates it, as ^N would
+        self.assertTrue(s.quit())
+        self.assertEqual(open(source).read().splitlines(),
+                         ["see Y[[Linked/Target]] [[", "[[Linked/Target#duty of care|the duty]]", "[[Linked/Missing]]"])
+        self.assertEqual(open(target).read().splitlines()[4], "X## Duty of care")
+        self.assertTrue(os.path.isfile(os.path.join(folder, "Missing.md")))
 
     def test_note_list_explains_folders(self):
         os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)

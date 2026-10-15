@@ -399,6 +399,9 @@ HEADING_RE = re.compile(r"^(#{1,6})\s")
 COMMENT_RE = re.compile(r"(?:^|(?<=\s))//.*$")
 # Highlighted text: ==like this== (exported as a yellow highlight in Word)
 MARK_RE = re.compile(r"==(?=\S).+?(?<=\S)==")
+# A link to another note: [[Folder/Name]], [[Folder/Name#Heading]], [[Folder/Name|shown text]];
+# groups: the note, the heading, the shown text
+LINK_RE = re.compile(r"\[\[\s*([^\s\[\]|#][^\[\]|#]*)(?:#([^\[\]|]*))?(?:\|([^\[\]]*))?\]\]")
 # Abbreviations expand when a word is finished (space, punctuation, Enter); add your own in
 # ABBREV_FILE, one "SHORT = Long form" per line (lawnotes --abbreviations opens it).
 DEFAULT_ABBREVIATIONS = {"CL": "Common Law", "EL": "Equity Law", "LCh": "Lord Chancellor"}
@@ -406,6 +409,40 @@ ABBREV_ENDS = " .,;:!?)]}\"'\u201d\u2019"
 BULLET_RE = re.compile(r"^(\s*)([-*+]|\d+[.)]|>)(\s+)(\[[ xX]\]\s+)?")
 BOLD_RE = re.compile(r"\*\*[^*]+\*\*")
 ITALIC_RE = re.compile(r"(?<![*\w])[*_][^*_\s][^*_]*[*_](?![*\w])")
+
+
+def link_name(rel):
+    """A note's name as links write it: Folder/Name, without .md."""
+    rel = rel.replace(os.sep, "/")
+    return rel[:-3] if rel.endswith(".md") else rel
+
+
+def link_index(rels):
+    """What links can point to, from the notes' paths relative to the notes folder: by full name
+    (lower case, with extension), and by bare name (all the notes called that)."""
+    exact, names = {}, {}
+    for rel in rels:
+        r = rel.replace(os.sep, "/")
+        exact.setdefault(r.lower(), rel)
+        names.setdefault(os.path.splitext(r.rpartition("/")[2])[0].lower(), []).append(rel)
+    return exact, names
+
+
+def link_matches(target, index):
+    """The notes a link's target could mean: [[Folder/Name]] that note, and a bare [[Name]] every
+    note of that name, in any folder. Exactly one: the link works."""
+    exact, names = index
+    t = "/".join(p for p in target.strip().lower().split("/") if p)
+    for cand in ((t,) if t.endswith(NOTE_EXTS) else (t + ".md", t + ".txt")):
+        if cand in exact:
+            return [exact[cand]]
+    return list(names.get(t, ())) if t and "/" not in t else []
+
+
+def link_text(m):
+    """What a link reads as in an export: its shown text, or the note's name."""
+    name = link_name(m.group(1).strip().rstrip("/")).rpartition("/")[2]
+    return (m.group(3) or "").strip() or name
 
 
 def pair_of(attr):
@@ -965,6 +1002,8 @@ def export_markdown(lines):
             line = COMMENT_RE.sub("", line).rstrip()
             if not line.strip():
                 continue
+        if "[[" in line:  # links to other notes read as plain text: their shown text or the note's name
+            line = LINK_RE.sub(link_text, line)
         stripped = line.lstrip(" ")
         indent = len(line) - len(stripped)
         if re.fullmatch(r"[-*+]\s*", stripped):  # an empty bullet carries nothing, and a lone "-"
@@ -1380,6 +1419,8 @@ HELP = [
     ("#", "Notes and folders"),
     ("^O", "Open a note. Type to filter the list; click a note or press Enter to open it."),
     ("^N", "New note. Use Folder/Name to file it in a folder, e.g. Contract/Offer — the folder is created for you."),
+    ("[[", "Link to another note: type [[ and pick the note (Enter writes [[Folder/Name]]). [[Folder/Name#Heading]] goes to a heading; [[Folder/Name|other words]] shows other words when exported. A bare [[Name]] works when only one note has that name. Links to notes that don't exist yet are dimmed."),
+    ("Option+L", "On a link: open the note it links to (or create it, if it doesn't exist yet). Elsewhere: Notes linking here, every link to this note from your other notes; Enter goes there."),
     ("^S", "Save now. Notes also save by themselves a few seconds after you stop typing, and when you quit."),
     ("^Q", "Save and quit."),
     ("#", "Writing"),
@@ -1423,7 +1464,7 @@ HELP = [
     ("**bold**", "Bold;  *italic*  italic."),
     ("#", "Colours"),
     ("Option+T", "Themes: pick NERV (dark red), Unit-01 (purple and green), Paper (light), or one of yours. New theme copies the current one into a file you can change: save it and Law Notes updates straight away. F6 does the same."),
-    ("", "Case names gold, citations like [1932] AC 562 pink, statutes like s 2(1) or Human Rights Act 1998 green, misspelt words highlighted in red."),
+    ("", "Case names gold, citations like [1932] AC 562 pink, statutes like s 2(1) or Human Rights Act 1998 green, links to other notes underlined, misspelt words highlighted in red."),
     ("D  V  C", "Party labels in problem answers: D (defendant) orange, V (victim) pink, C (claimant) blue; also D1, D2, D's."),
     ("", "If Law Notes ever closes or crashes unexpectedly, the reason is logged in iCloud Drive → Law Notes Logs."),
     ("", "Notes are plain Markdown files in ~/UCL/notes, which points to iCloud Drive → UCL Notes, so they're backed up off this Mac and open on iPhone or iPad (Files app). Any other app can open them too."),
@@ -1492,6 +1533,7 @@ class App:
         self.partial = b""      # the first bytes of a character still arriving (see read_char)
         self.spell_cycle = None  # after ^W fixed a word: the word, its suggestions and which one is in
         self.queued = []  # keys a menu chose, handled as if typed
+        self._links = (0.0, None)  # when the notes were last listed for links, and their link_index
         self.history = History()
         self.abbreviations = load_abbreviations()
         self.speller = Speller(SPELL_LANG) if SPELL_ON and sys.platform == "darwin" else None
@@ -1525,7 +1567,7 @@ class App:
             "party_D": (C.COLOR_BLACK, C.COLOR_YELLOW), "party_V": (C.COLOR_BLACK, C.COLOR_MAGENTA),
             "party_C": (C.COLOR_BLACK, C.COLOR_CYAN), "copied": (C.COLOR_BLACK, C.COLOR_GREEN),
             "bar_off": (C.COLOR_WHITE, C.COLOR_BLACK), "comment": (C.COLOR_BLACK, C.COLOR_YELLOW),
-            "mark": (C.COLOR_BLACK, C.COLOR_YELLOW),
+            "mark": (C.COLOR_BLACK, C.COLOR_YELLOW), "link": (C.COLOR_CYAN, C.COLOR_RED),
         }
         palette = {role: (theme[role], c8) for role, c8 in basic.items()}
         pairs = {}
@@ -1535,8 +1577,8 @@ class App:
                 pairs[role] = curses.color_pair(n)
             else:
                 pairs[role] = curses.A_REVERSE if role in ("match", "bar", "key", "sel") else 0
-        # Words inside case names, citations and statutes are never marked as misspelt
-        self.protected = {pair_of(pairs[r]) for r in ("case", "cite", "statute")} if colors else set()
+        # Words inside case names, citations, statutes and links (dim: broken ones) are never marked as misspelt
+        self.protected = {pair_of(pairs[r]) for r in ("case", "cite", "statute", "link", "dim")} if colors else set()
         self.scr.bkgd(" ", pairs["text"])
 
         self.A = {
@@ -1561,6 +1603,7 @@ class App:
             "bar_off": pairs["bar_off"],
             "comment": pairs["comment"],
             "mark": pairs["mark"] | curses.A_BOLD,
+            "link": pairs["link"] | curses.A_UNDERLINE,
         }
         self.italic = italic
         return problems
@@ -1890,6 +1933,11 @@ class App:
             bm = BULLET_RE.match(line)
             if bm and not quote:
                 attrs[bm.start(2):bm.end(2)] = [A["bullet"]] * len(bm.group(2))
+        if "[[" in line:  # links to other notes; dimmed when there's no such note (yet)
+            index = self.link_targets()
+            for mm in LINK_RE.finditer(line):
+                look = A["link"] if len(link_matches(mm.group(1), index)) == 1 else A["dim"]
+                attrs[mm.start():mm.end()] = [look] * (mm.end() - mm.start())
         for mm in MARK_RE.finditer(line):     # ==highlighted text==
             attrs[mm.start():mm.end()] = [A["mark"]] * (mm.end() - mm.start())
         for cm in COMMENT_RE.finditer(line):  # // comments, like a highlighter pen
@@ -2002,6 +2050,8 @@ class App:
 
     def draw(self, refresh=True):
         scr = self.scr
+        if self._links[1] is not None:
+            self.link_targets()  # a note made or deleted elsewhere re-colours the links to it
         scr.erase()
         H, W = scr.getmaxyx()
         if H < 5 or W < 30:
@@ -2114,6 +2164,8 @@ class App:
             left += f"   {self.msg}"
         elif active and self.spell_hint():
             left += "   " + self.spell_hint()
+        elif active and self.link_hint():
+            left += "   " + self.link_hint()
         elif active and self.speller and self.speller.state == "compiling":
             left += "   preparing spell check…"
         right = f"Ln {b.cy + 1}/{len(b.lines)}   {words:,} words "
@@ -2188,7 +2240,7 @@ class App:
             first = self.get_key()
             if first in ("\r", "\n"):
                 return ("key", "shift-enter")  # Option+Enter on terminals using Option as Meta
-            if first in ("b", "f", "e", "d", "D", "w", "o", "h", "t", "\x7f", "\x08"):
+            if first in ("b", "f", "e", "d", "D", "w", "o", "h", "t", "l", "\x7f", "\x08"):
                 return ("alt", first)
             if isinstance(first, int):  # Esc + an arrow curses already decoded: Option+arrow
                 return ("key", OPTION_ARROWS.get(first))
@@ -2774,6 +2826,130 @@ class App:
         except ValueError as e:
             self.say(str(e), 6)
 
+    # Links between notes
+    def link_targets(self, fresh=False):
+        """link_index() of every note, listed again at most every few seconds: it decides which
+        links show as broken, so a change re-colours them."""
+        when, index = self._links
+        if fresh or index is None or time.time() - when > 5:
+            new = link_index(rel for _, rel, _ in self.list_notes())
+            if new != index:
+                self._hl.clear()
+            self._links = (time.time(), new)
+        return self._links[1]
+
+    def link_at(self):
+        """The [[link]] under the cursor (or just before it) as a match, or None."""
+        b, before = self.buf, None
+        for m in LINK_RE.finditer(b.lines[b.cy]):
+            if m.start() <= b.cx < m.end():
+                return m
+            if m.end() == b.cx:
+                before = m
+        return before
+
+    def link_hint(self):
+        """The status bar on a link: where it goes, or that the note doesn't exist yet."""
+        m = self.link_at()
+        if not m:
+            return None
+        target, found = m.group(1).strip(), link_matches(m.group(1), self.link_targets())
+        if len(found) == 1:
+            return f"→ {link_name(found[0])}   Option+L opens it"
+        if found:
+            return f"{len(found)} notes are called “{target}”   Option+L to choose"
+        return f"No note “{target}” yet   Option+L creates it"
+
+    def link_picker(self):
+        """[[ typed: pick the note to link to; Enter writes its name and the closing ]]."""
+        names = [link_name(rel) for _, rel, _ in self.list_notes()]
+
+        def build(query):
+            words = query.lower().split()
+            items = [(n, n) for n in names if all(w in n.lower() for w in words)]
+            name = query.strip().strip("/")
+            if name and name.lower() not in (n.lower() for n in names):
+                items.append((f"+ Link to “{name}”, a note you haven't written yet (Option+L on it creates it)", name))
+            return items
+
+        choice = self.pick("Link to a note", build, "No notes yet. Type a name to link to a note you'll write later.",
+                           guide="Enter writes the link, e.g. [[Tort/Negligence]]; add #Heading to go to a heading. "
+                                 "Esc leaves the [[ as typed.")
+        if choice:
+            self.buf.insert(choice + "]]", kind="link")
+
+    def links(self):
+        """Option+L: on a [[link]], open the note it links to (or offer to make it); elsewhere,
+        list the notes that link to this one."""
+        m = self.link_at()
+        if not m:
+            self.backlinks()
+            return
+        target, heading = m.group(1).strip(), (m.group(2) or "").strip()
+        found = link_matches(target, self.link_targets(fresh=True))
+        if not found:  # like ^N, with the name filled in
+            name = self.prompt(f"No note “{target}” yet. New note: ", target)
+            if not name or not name.strip("/ "):
+                return
+            try:
+                path = note_path(name)
+            except ValueError as e:
+                self.say(str(e), 6)
+                return
+            if self.open(path):
+                self.link_targets(fresh=True)  # the link isn't broken any more
+            return
+        rel = found[0] if len(found) == 1 else self.pick(
+            f"{len(found)} notes are called “{target}”: which one? (write [[Folder/{target}]] to say)",
+            lambda q: [(link_name(r), r) for r in found if q.lower() in r.lower()])
+        if not rel:
+            return
+        path = os.path.join(NOTES_DIR, rel)
+        if os.path.realpath(path) != os.path.realpath(self.buf.path):
+            if not self.open(path):
+                return
+        elif not heading:
+            self.say("That link is to this note")
+        if heading:
+            self.goto_heading(heading)
+
+    def goto_heading(self, heading):
+        """The heading a [[Note#Heading]] link names: the same text (any case), else the first containing it."""
+        b, want = self.buf, " ".join(heading.split()).lower()
+        heads = []
+        for i, line in enumerate(b.lines):
+            m = HEADING_RE.match(line)
+            if m:
+                heads.append((i, " ".join(line[m.end():].strip(" #").split()).lower()))
+        for i, text in [h for h in heads if h[1] == want] + [h for h in heads if want in h[1]]:
+            b.cy, b.cx = i, 0
+            return
+        self.say(f"No heading “{heading}” in this note")
+
+    def backlinks(self):
+        """Notes linking here: every [[link]] in any note that leads to this one. Enter goes to it."""
+        notes, me = self.all_notes(), os.path.realpath(self.buf.path)
+        mine = next((rel for path, rel, _ in notes if os.path.realpath(path) == me), None)
+        if not mine or not inside_notes(self.buf.path):
+            self.say("Only notes in the notes folder can be linked to")
+            return
+        index = link_index(rel for _, rel, _ in notes)
+        items = []
+        for path, rel, lines in notes:
+            for i, line in enumerate(lines):
+                if "[[" not in line:
+                    continue
+                for m in LINK_RE.finditer(line):
+                    if link_matches(m.group(1), index) == [mine]:
+                        items.append((f"{rel}:{i + 1}   {self.snippet(line, m.start(), len(m.group()))}",
+                                      (path, i, m.start())))
+        count = len({it[1][0] for it in items})
+        choice = self.pick(f"Notes linking here — {count} note{'s' * (count != 1)} link to {link_name(mine)}",
+                           lambda q: [it for it in items if all(w in it[0].lower() for w in q.lower().split())],
+                           f"No notes link here yet. To link to this one, type [[ in another note and pick {link_name(mine)}.")
+        if choice:
+            self.goto(*choice)
+
     # Selection, clipboard, mouse
     def selection(self):
         """((line, col), (line, col)) in order, or None when nothing is selected."""
@@ -3024,7 +3200,8 @@ class App:
                   ("Split one above the other", "Option+Shift+D", ["split-down"])]
         if len(list(self.panes())) > 1:
             items += [("Next pane", "Option+O", ["next-pane"]), ("Close this pane", "Option+W", ["close-pane"])]
-        items += [None, ("Export…", "Option+E", ["export"]), ("Themes…", "Option+T", ["themes"])]
+        items += [None, ("Open linked note" if self.link_at() else "Notes linking here", "Option+L", ["links"]),
+                  ("Export…", "Option+E", ["export"]), ("Themes…", "Option+T", ["themes"])]
         choices = [i for i, it in enumerate(items) if it]
         width = max(len(it[0]) + len(it[1]) for it in items if it) + 5
         H, W = self.scr.getmaxyx()
@@ -3133,7 +3310,7 @@ class App:
                 return r
             if r[0] == "alt":
                 return {"b": "word-left", "f": "word-right", "e": "export", "d": "split-right",
-                        "D": "split-down", "w": "close-pane", "o": "next-pane", "h": "highlight", "t": "themes",
+                        "D": "split-down", "w": "close-pane", "o": "next-pane", "h": "highlight", "t": "themes", "l": "links",
                         "\x7f": "delete-word-left", "\x08": "delete-word-left"}[r[1]]
             return r[1]  # a curses key, a name, or None for keys we don't use
         if key == curses.KEY_MOUSE:
@@ -3280,6 +3457,8 @@ class App:
             self.export()
         elif key in ("themes", curses.KEY_F6):
             self.choose_theme()
+        elif key == "links":
+            self.links()
         elif key == "\x0c":
             self.outline()
         elif key == "\x0b":
@@ -3319,6 +3498,8 @@ class App:
             if key in ABBREV_ENDS:
                 self.expand_abbreviation()
             b.insert(key)
+            if key == "[" and re.search(r"(?<!\[)\[\[$", b.lines[b.cy][:b.cx]):
+                self.link_picker()  # [[ starts a link: pick the note
         elif isinstance(key, str) and len(key) == 1 and unicodedata.category(key) == "Zs":
             b.insert(" ")  # e.g. Option+Space types a non-breaking space
 
