@@ -5,6 +5,7 @@
 - Highlights case names (*Donoghue v Stevenson*), citations (`[1932] AC 562`) and statutes (`s 2(1)`, *Human Rights Act 1998*).
 - Templates for case briefs, IRAC problem answers, statutes, essay plans and lecture notes.
 - Search across all notes (^P), a case index across all notes (^B), and an outline of the open note (^L).
+- Open to-dos from every note (Option+J or F10); Enter jumps to one, and x ticks it with undo.
 - Revision cards (Option+C): your case briefs and case bullets become cards to revise, due cards first; progress syncs between Macs.
 - Abbreviations that expand as you type (CL → Common Law); Option+A opens your list beside the note, with suggestions from the shorthand your notes already use.
 - Find and replace in one note or in all of them (Option+R), e.g. a misspelt case name or a wrong citation; ^R can undo it for any note.

@@ -429,6 +429,7 @@ NEVER_EXPAND = {
 }
 ABBREV_ENDS = " .,;:!?)]}\"'\u201d\u2019"
 BULLET_RE = re.compile(r"^(\s*)([-*+]|\d+[.)]|>)(\s+)(\[[ xX]\]\s+)?")
+TODO_RE = re.compile(r"^\s*-\s+\[( )\](?=\s|$)")
 BOLD_RE = re.compile(r"\*\*[^*]+\*\*")
 ITALIC_RE = re.compile(r"(?<![*\w])[*_][^*_\s][^*_]*[*_](?![*\w])")
 
@@ -2006,6 +2007,7 @@ HELP = [
     ("#", "Searching"),
     ("^P", "Search all notes: every line that mentions what you type, in every note. Enter jumps there."),
     ("^B", "Case index: every case cited in any note, with its citation and the notes that mention it."),
+    ("Option+J", "Open to-dos in all notes. Type to filter; Enter jumps to a to-do, x ticks it. F10 does the same."),
     ("^L", "Outline: jump to any heading or case in this note."),
     ("#", "Revising"),
     ("Option+C", "Revision cards from your notes: each case brief (^T) is a card (the case and citation on the front, the brief on the back), and so is a bullet that names a case and says something about it. Choose this note, its folder or all notes. Space shows the answer; then 1 again, 2 hard, 3 good. Cards come back after 1, 3, 7, 14, 30, then 60 days; due cards first, then new ones. Esc ends. Progress is kept in UCL Notes, so every Mac shares it. F7 does the same."),
@@ -2055,6 +2057,7 @@ CSI_KEYS = {
     "[H": curses.KEY_HOME, "OH": curses.KEY_HOME, "[1~": curses.KEY_HOME, "[7~": curses.KEY_HOME,
     "[F": curses.KEY_END, "OF": curses.KEY_END, "[4~": curses.KEY_END, "[8~": curses.KEY_END,
     "[3~": curses.KEY_DC, "[5~": curses.KEY_PPAGE, "[6~": curses.KEY_NPAGE, "[Z": curses.KEY_BTAB,
+    "[21~": curses.KEY_F10,
     "[27;2;13~": "shift-enter", "[13;2u": "shift-enter",
     "[1;3D": "word-left", "[1;5D": "word-left", "[1;3C": "word-right", "[1;5C": "word-right",
     "[3;3~": "delete-word-right", "[3;5~": "delete-word-right",
@@ -2835,7 +2838,7 @@ class App:
             first = self.get_key()
             if first in ("\r", "\n"):
                 return ("key", "shift-enter")  # Option+Enter on terminals using Option as Meta
-            if first in ("b", "f", "e", "d", "D", "w", "o", "h", "t", "c", "r", "l", "a", "\x7f", "\x08"):
+            if first in ("b", "f", "e", "d", "D", "w", "o", "h", "t", "c", "r", "l", "a", "j", "\x7f", "\x08"):
                 return ("alt", first)
             if isinstance(first, int):  # Esc + an arrow curses already decoded: Option+arrow
                 return ("key", OPTION_ARROWS.get(first))
@@ -2910,7 +2913,7 @@ class App:
             elif isinstance(k, str) and k.isprintable():
                 text += k
 
-    def pick(self, title, build, empty_hint="", guide="", pane=None):
+    def pick(self, title, build, empty_hint="", guide="", pane=None, on_key=None):
         """Filterable list, full screen or inside a pane (the other panes stay in view).
         build(query) -> [(label, value)]. Click an item or press Enter. Returns value or None."""
         query, sel, off, pressed_on = "", 0, 0, None
@@ -2931,7 +2934,7 @@ class App:
             listh = max(1, H - top - 2)
             off = min(off, sel)
             off = max(off, sel - listh + 1)
-            self.put(Y, X + 1, title[:W - 2], self.A["h1"])
+            self.put(Y, X + 1, (title() if callable(title) else title)[:W - 2], self.A["h1"])
             self.put(Y + 1, X + 1, ("Filter: " + query)[:W - 2])
             for r, text in enumerate(guide_rows):
                 self.put(Y + 2 + r, X + 1, text[:W - 2], self.A["dim"])
@@ -2987,6 +2990,8 @@ class App:
                 continue
             if k in ("\x03", "\x11"):
                 return None
+            if on_key and on_key(k, items[sel][1] if items else None):
+                continue
             elif k == curses.KEY_UP:
                 sel -= 1
             elif k == curses.KEY_DOWN:
@@ -3273,6 +3278,67 @@ class App:
             path, i, j, q = choice
             self.goto(path, i, j)
             self.search = q  # highlight it in the note; Esc clears
+
+    def todos(self):
+        entries = []
+        for path, rel, lines in self.all_notes():
+            for i, line in enumerate(lines):
+                m = TODO_RE.match(line)
+                if m:
+                    label = f"{line[m.end():].strip()} · {os.path.splitext(rel)[0]}"
+                    entries.append((label, (path, rel, i, line)))
+        if not entries:
+            self.say("No open to-dos in your notes")
+            return
+
+        def title():
+            count = len(entries)
+            notes = len({value[1] for _, value in entries})
+            return f"To-dos · {count} in {notes} note{'s' * (notes != 1)}"
+
+        def build(query):
+            words = query.lower().split()
+            width = self.scr.getmaxyx()[1] - 2 if hasattr(self, "scr") else 1000
+            items = []
+            for label, value in entries:
+                if not all(w in label.lower() for w in words):
+                    continue
+                text, note = label.rsplit(" · ", 1)
+                if len(note) > width // 2:
+                    note = "…" + note[-(width // 2 - 1):]
+                room = max(1, width - len(note) - 3)
+                if len(text) > room:
+                    text = text[:room - 1] + "…"
+                items.append((f"{text} · {note}", value))
+            return items
+
+        def on_key(key, value):
+            if key != "x" or value is None:
+                return False
+            path, rel, i, original = value
+            if os.path.realpath(path) != os.path.realpath(self.buf.path) and not os.path.exists(path):
+                self.say("This note has moved; reopen the to-do list", 8)
+                entries[:] = [entry for entry in entries if entry[1] != value]
+                return True
+            self.goto(path, i)
+            if os.path.realpath(self.buf.path) != os.path.realpath(path):
+                return True  # open() showed why it could not switch notes
+            b = self.buf
+            if i >= len(b.lines) or b.lines[i] != original or not TODO_RE.match(b.lines[i]):
+                self.say("This to-do changed; reopen the list", 8)
+            else:
+                b.cy, b.cx = i, TODO_RE.match(original).start(1)
+                b.sel_anchor = self.anchor = None
+                b.checkpoint("todo")
+                b.lines[i] = original[:b.cx] + "x" + original[b.cx + 1:]
+            entries[:] = [entry for entry in entries if entry[1] != value]
+            return True
+
+        choice = self.pick(title, build, "No open to-dos here.",
+                           guide="Enter jumps to a to-do · x ticks it", on_key=on_key)
+        if choice:
+            path, _, i, _ = choice
+            self.goto(path, i)
 
     def case_index(self):
         cases = {}
@@ -4225,6 +4291,7 @@ class App:
             items += [("Next pane", "Option+O", ["next-pane"]), ("Close this pane", "Option+W", ["close-pane"])]
         items += [None, ("Open linked note" if self.link_at() else "Notes linking here", "Option+L", ["links"]),
                   ("Replace…", "Option+R", ["replace"]), ("Revision cards…", "Option+C", ["cards"]),
+                  ("Open to-dos…", "Option+J", ["todos"]),
                   ("Abbreviations…", "Option+A", ["abbreviations"]),
                   ("Export…", "Option+E", ["export"]), ("Themes…", "Option+T", ["themes"])]
         H, W = self.scr.getmaxyx()
@@ -4338,7 +4405,7 @@ class App:
             if r[0] == "alt":
                 return {"b": "word-left", "f": "word-right", "e": "export", "d": "split-right",
                         "D": "split-down", "w": "close-pane", "o": "next-pane", "h": "highlight", "t": "themes",
-                        "c": "cards", "r": "replace", "l": "links", "a": "abbreviations",
+                        "c": "cards", "r": "replace", "l": "links", "a": "abbreviations", "j": "todos",
                         "\x7f": "delete-word-left", "\x08": "delete-word-left"}[r[1]]
             return r[1]  # a curses key, a name, or None for keys we don't use
         if key == curses.KEY_MOUSE:
@@ -4457,6 +4524,8 @@ class App:
             self.search_all()
         elif key == "\x02":
             self.case_index()
+        elif key in ("todos", curses.KEY_F10):
+            self.todos()
         elif key == "\x12":
             self.history_menu()
         elif key == "\x0f":

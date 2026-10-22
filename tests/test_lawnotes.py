@@ -695,6 +695,52 @@ class ReplaceTests(unittest.TestCase):
         self.assertEqual(lawnotes.moved_col(line, 3, "Donohue", "Donoghue"), 8)    # inside: end of it
         self.assertEqual(lawnotes.moved_col(line, 28, "Donohue", "D"), 16)          # end of line
 
+    def test_todos_order_filter_tick_and_undo(self):
+        a = self.note("Contract/Offer.md", "- [ ] Read Carlill\n  - [ ] Write answer\n- [x] Done\n")
+        b = self.note("Tort/Duty.md", "- [ ] Check duty\n* [ ] Not a to-do\n")
+        os.utime(a, (100, 100))
+        os.utime(b, (200, 200))
+        app = self.app(a)
+
+        def pick(title, build, *args, **kwargs):
+            self.assertEqual(title(), "To-dos · 3 in 2 notes")
+            self.assertEqual([label for label, _ in build("")],
+                             ["Check duty · Tort/Duty", "Read Carlill · Contract/Offer",
+                              "Write answer · Contract/Offer"])
+            self.assertEqual([label for label, _ in build("read contract")],
+                             ["Read Carlill · Contract/Offer"])
+            self.assertTrue(kwargs["on_key"]("x", build("")[0][1]))
+            self.assertEqual(title(), "To-dos · 2 in 1 note")
+            return None
+
+        app.pick = pick
+        app.todos()
+        self.assertEqual(app.buf.path, b)
+        self.assertEqual(app.buf.lines[0], "- [x] Check duty")
+        self.assertEqual(open(b).read().splitlines()[0], "- [ ] Check duty")
+        self.assertTrue(app.buf.undo())
+        self.assertEqual(app.buf.lines[0], "- [ ] Check duty")
+
+    def test_todos_empty_message(self):
+        a = self.note("Done.md", "- [x] Finished\n")
+        app = self.app(a)
+        app.todos()
+        self.assertEqual(app.msg, "No open to-dos in your notes")
+
+    def test_todos_narrow_labels_keep_the_note(self):
+        a = self.note("Contract/Offer.md", "- [ ] Read the whole judgment about unilateral offers\n")
+        app = self.app(a)
+        app.scr = type("Screen", (), {"getmaxyx": lambda self: (40, 40)})()
+
+        def pick(title, build, *args, **kwargs):
+            label = build("unilateral")[0][0]  # the full text is still searchable
+            self.assertLessEqual(len(label), 38)
+            self.assertTrue(label.endswith(" · Contract/Offer"))
+            return None
+
+        app.pick = pick
+        app.todos()
+
     def test_this_note_is_one_undo_step(self):
         a = self.note("A.md", "Donohue v Stevenson\nper Lord Atkin in Donohue\n")
         app = self.app(a)
@@ -979,6 +1025,33 @@ class Session:
 
 
 class SessionTests(unittest.TestCase):
+    def test_todos_keys_in_narrow_pane(self):
+        folder = os.path.join(tempfile.mkdtemp(dir=TMP), "notes", "Todos")
+        os.makedirs(folder, exist_ok=True)
+        env = {"LAWNOTES_DIR": os.path.dirname(folder)}
+        a, b = os.path.join(folder, "A.md"), os.path.join(folder, "B.md")
+        open(a, "w").write("- [ ] Read Carlill\n- [x] Done\n")
+        open(b, "w").write("- [ ] Write answer\n")
+        os.utime(a, (100, 100))
+        os.utime(b, (200, 200))
+        s = Session(a, env=env, size=(40, 40))
+        screen = s.keys(b"\x1bj", 0.6)
+        self.assertIn("To-dos · 2 in 2 notes", screen)
+        self.assertIn("Write answer · Todos/B", screen)
+        screen = s.keys(b"x", 0.6)
+        self.assertIn("1 in 1", screen)  # curses redraws only the changed part of the title
+        self.assertIn("Read Carlill · Todos/A", screen)
+        s.keys(b"\x1b\x1a", 0.6)  # leave list, then undo the tick in B
+        self.assertTrue(s.quit())
+        self.assertEqual(open(b).read(), "- [ ] Write answer\n")
+
+        s = Session(a, env=env, size=(40, 40))
+        screen = s.keys(b"\x1b[21~", 0.6)  # F10
+        self.assertIn("To-dos · 2 in 2 notes", screen)
+        s.keys(b"\r\x05!\x13", 0.6)  # Enter jumps to B's to-do
+        self.assertTrue(s.quit())
+        self.assertEqual(open(b).read(), "- [ ] Write answer!\n")
+
     def test_double_and_triple_click(self):
         note = os.path.join(lawnotes.NOTES_DIR, "Click.md")
         os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
