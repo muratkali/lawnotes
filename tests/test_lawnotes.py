@@ -3,6 +3,7 @@
 Run: python3 -m unittest discover -s tests -v
 Uses only temporary folders; never touches your notes, history or install.
 """
+import datetime
 import json
 import os
 import pty
@@ -1558,6 +1559,241 @@ class LauncherTests(unittest.TestCase):
             for f in (lawnotes.RUNNING_FILE, lawnotes.REQUEST_FILE):
                 if os.path.exists(f):
                     os.remove(f)
+
+
+class RevisionPackTests(unittest.TestCase):
+    WHEN = datetime.date(2026, 10, 22)
+
+    def setUp(self):
+        self.out = tempfile.mkdtemp(dir=TMP)
+        self._export = lawnotes.EXPORT_DIR
+        lawnotes.EXPORT_DIR = self.out
+
+    def tearDown(self):
+        lawnotes.EXPORT_DIR = self._export
+
+    def test_date_is_british(self):
+        self.assertEqual(lawnotes.british_date(datetime.date(2026, 10, 22)), "22 October 2026")
+        self.assertEqual(lawnotes.british_date(datetime.date(2026, 1, 1)), "1 January 2026")
+
+    def test_footnotes_are_renamed_per_note(self):
+        notes = [
+            ("Offer", ["Duty.[^1] and more.[^2]", "", "[^1]: Neighbour.", "[^2]: Proximity."]),
+            ("Acceptance", ["Posted.[^1]", "", "[^1]: Postal rule."]),
+        ]
+        md = lawnotes.revision_pack_markdown(notes, "Contract", self.WHEN)
+        self.assertIn("[^n1-1]", md)
+        self.assertIn("[^n1-2]", md)
+        self.assertIn("[^n2-1]", md)
+        self.assertIn("[^n1-1]: Neighbour.", md)
+        self.assertIn("[^n2-1]: Postal rule.", md)
+        self.assertNotRegex(md, r"\[\^1\]")
+        self.assertNotRegex(md, r"\[\^2\]")
+        # one note on its own is unchanged
+        alone = lawnotes.export_markdown(["Duty.[^1]", "", "[^1]: Neighbour."])
+        self.assertIn("[^1]", alone)
+        self.assertNotIn("[^n", alone)
+
+    def test_headings_drop_one_level(self):
+        lines = ["# A", "## B", "### C", "#### D", "##### E", "###### F",
+                 "## See [[Tort/X|the duty]]"]
+        md = lawnotes.revision_pack_markdown([("Note", lines)], "Tort", self.WHEN)
+        self.assertIn("\n# Note\n", md)
+        self.assertIn("\n## A\n", md)
+        self.assertIn("\n### B\n", md)
+        self.assertIn("\n#### C\n", md)
+        self.assertIn("\n##### D\n", md)
+        self.assertIn("\n###### E\n", md)
+        self.assertIn("\n###### F\n", md)          # already as deep as Markdown goes
+        self.assertNotIn("#######", md)
+        self.assertNotIn("\n# A\n", md)
+        self.assertIn("\n### See the duty\n", md)
+        self.assertNotIn("[[", md)
+
+    def test_order_comments_links_and_italics(self):
+        notes = [
+            ("Offer", ["See [[Contract/Acceptance|acceptance]] and Donoghue v Stevenson.[^1] // HIDEME",
+                       "", "[^1]: The neighbour.", "// whole line"]),
+            ("Acceptance", ["Posted."]),
+        ]
+        md = lawnotes.revision_pack_markdown(notes, 'Say "hi"', self.WHEN)
+        self.assertLess(md.index("\n# Offer\n"), md.index("\n# Acceptance\n"))
+        self.assertIn('title: "Say \\"hi\\""', md)
+        self.assertIn('date: "22 October 2026"', md)
+        self.assertIn("acceptance and *Donoghue v Stevenson*", md)
+        self.assertNotIn("HIDEME", md)
+        self.assertNotIn("whole line", md)
+        self.assertNotIn("[[", md)
+        self.assertLess(md.index('w:type="page"'), md.index("\n# Offer\n"))
+
+    def test_one_table_set_after_the_contents_slot(self):
+        notes = [
+            ("Offer", ["Donoghue v Stevenson [1932] AC 562", "Human Rights Act 1998",
+                       "// Fake v Case [1999] AC 1"]),
+            ("Acceptance", ["Donoghue v Stevenson [1932] AC 562", "R v Brown"]),
+        ]
+        md = lawnotes.revision_pack_markdown(notes, "Tort", self.WHEN, tables=True)
+        self.assertEqual(md.count("## Table of Cases"), 1)
+        self.assertEqual(md.count("## Table of Legislation"), 1)
+        front = md.split("\n# Offer\n")[0]
+        self.assertEqual(front.count("Donoghue v Stevenson"), 1)   # cited in both notes, listed once
+        self.assertIn("R v Brown", front)
+        self.assertIn("Human Rights Act 1998", front)
+        self.assertNotIn("Fake v Case", md)
+        self.assertLess(md.index("## Table of Cases"), md.index('w:type="page"'))
+        self.assertLess(md.index('w:type="page"'), md.index("\n# Offer\n"))
+        plain = lawnotes.revision_pack_markdown(notes, "Tort", self.WHEN)
+        self.assertNotIn("Table of Cases", plain)
+        empty = lawnotes.revision_pack_markdown([("A", ["No authority here."])], "Tort", self.WHEN, tables=True)
+        self.assertNotIn("Table of Cases", empty)
+
+    def test_folder_notes_follow_the_open_list(self):
+        listed = [
+            (30, "Tort/New.md", "/n/Tort/New.md"),
+            (20, "Tortoise/No.md", "/n/Tortoise/No.md"),
+            (10, "Tort/Old/Deep.md", "/n/Tort/Old/Deep.md"),
+            (0, "Other.md", "/n/Other.md"),
+        ]
+        self.assertEqual(lawnotes.notes_in_folder(listed, "Tort"), [
+            ("New", "/n/Tort/New.md"),
+            ("Old/Deep", "/n/Tort/Old/Deep.md"),
+        ])
+        self.assertEqual(lawnotes.pack_export_name("Tort"), "Tort revision pack")
+        self.assertEqual(lawnotes.pack_export_name("Tort/Duty"), "Tort-Duty revision pack")
+        folder = os.path.join(lawnotes.NOTES_DIR, "PackOrder")
+        os.makedirs(os.path.join(folder, "Sub"), exist_ok=True)
+        for name, when in (("Old.md", 1_000_000_000), ("Sub/Mid.md", 1_100_000_000), ("New.md", 1_200_000_000)):
+            path = os.path.join(folder, name)
+            open(path, "w").write("x\n")
+            os.utime(path, (when, when))
+        side = os.path.join(lawnotes.NOTES_DIR, "PackOrder2", "No.md")
+        os.makedirs(os.path.dirname(side), exist_ok=True)
+        open(side, "w").write("no\n")
+        names = [name for name, _ in lawnotes.notes_in_folder(lawnotes.App.list_notes(object()), "PackOrder")]
+        self.assertEqual(names, ["New", "Sub/Mid", "Old"])
+
+    def test_note_folder_and_help(self):
+        root = os.path.join(lawnotes.NOTES_DIR, "LoosePack.md")
+        nested = os.path.join(lawnotes.NOTES_DIR, "Fold", "Deep", "Cap.md")
+        os.makedirs(os.path.dirname(nested), exist_ok=True)
+        open(root, "w").write("x\n")
+        open(nested, "w").write("x\n")
+        self.assertIsNone(lawnotes.note_folder(root))
+        self.assertEqual(lawnotes.note_folder(nested), "Fold/Deep")
+        outside = os.path.join(TMP, "outside-pack.md")
+        open(outside, "w").write("x\n")
+        self.assertIsNone(lawnotes.note_folder(outside))
+        text = next(desc for key, desc in lawnotes.HELP if key == "Option+E")
+        self.assertIn("Revision pack", text)
+        self.assertIn("this note's folder", text)
+
+    @unittest.skipUnless(lawnotes.find_tool("pandoc"), "export needs pandoc (brew install pandoc)")
+    def test_export_pack_docx(self):
+        import zipfile
+        notes = [
+            ("Offer", ["# The rule", "Duty: Donoghue v Stevenson [1932] AC 562.[^1]",
+                       "Human Rights Act 1998.", "See [[Tort/X|the duty]]. // HIDEME", "",
+                       "[^1]: Neighbour principle."]),
+            ("Acceptance", ["R v Brown.[^1]", "", "[^1]: Postal rule.", "// Fake v Case [1999] AC 1"]),
+        ]
+        path = lawnotes.export_revision_pack("Tort", notes, "docx", tables=True, when=self.WHEN)
+        self.assertEqual(os.path.basename(path), "Tort revision pack.docx")
+        z = zipfile.ZipFile(path)
+        doc, notes_xml = z.read("word/document.xml").decode(), z.read("word/footnotes.xml").decode()
+        self.assertIn("22 October 2026", doc)
+        self.assertIn("Contents", doc)
+        self.assertIn("Table of Cases", doc)
+        self.assertIn("Table of Legislation", doc)
+        self.assertLess(doc.index("Table of Cases"), doc.index('w:type="page"'))
+        self.assertLess(doc.index('w:type="page"'), doc.index(">Offer<"))
+        self.assertLess(doc.index(">Offer<"), doc.index(">The rule<"))
+        self.assertLess(doc.index(">The rule<"), doc.index(">Acceptance<"))
+        self.assertIn('w:val="Heading1"', doc[doc.index(">Offer<") - 400:doc.index(">Offer<")])
+        self.assertIn('w:val="Heading2"', doc[doc.index(">The rule<") - 400:doc.index(">The rule<")])
+        self.assertIn("Neighbour principle", notes_xml)
+        self.assertIn("Postal rule", notes_xml)
+        self.assertIn("the duty", doc)
+        self.assertNotIn("HIDEME", doc)
+        self.assertNotIn("Fake v Case", doc)
+        self.assertNotIn("page-break-before", doc)   # the HTML break is not written into Word
+        self.assertIn("Times New Roman", z.read("word/styles.xml").decode())
+
+    def test_menu_at_forty_columns_exports_the_folder(self):
+        folder = os.path.join(lawnotes.NOTES_DIR, "RevPack")
+        os.makedirs(os.path.join(folder, "Deep"), exist_ok=True)
+        offer = os.path.join(folder, "Offer.md")
+        older = os.path.join(folder, "Acceptance.md")
+        mid = os.path.join(folder, "Deep", "Caparo.md")
+        open(offer, "w").write("# The rule\n\nDuty.[^1]\n\n[^1]: Neighbour principle.\n")
+        open(older, "w").write("Posted.[^1] // HIDEME\n\n[^1]: Postal rule.\n")
+        open(mid, "w").write("Three-stage test.\n")
+        os.utime(offer, (100, 100))          # oldest: saving it on export must not move it first
+        os.utime(mid, (200, 200))
+        os.utime(older, (300, 300))
+        side = os.path.join(lawnotes.NOTES_DIR, "RevPack2", "No.md")
+        os.makedirs(os.path.dirname(side), exist_ok=True)
+        open(side, "w").write("NOTINPACK2\n")
+        open(os.path.join(lawnotes.NOTES_DIR, "NotInPack.md"), "w").write("NOTINPACK\n")
+        loose = os.path.join(lawnotes.NOTES_DIR, "LooseMenu.md")
+        open(loose, "w").write("Just a note.\n")
+        narrow = Session(loose, size=(40, 40))
+        try:
+            screen = narrow.keys(b"\x1be", 0.7)       # Option+E, and this note is not in a folder
+            self.assertNotIn("Revision pack", screen)
+            narrow.keys(b"\x1b", 0.5)
+            self.assertTrue(narrow.quit())
+        finally:
+            try:
+                os.kill(narrow.pid, 9)
+            except OSError:
+                pass
+            try:
+                os.waitpid(narrow.pid, 0)
+            except OSError:
+                pass
+        s = Session(offer, env={"LAWNOTES_EXPORT_DIR": self.out}, size=(40, 40))
+        try:
+            screen = s.keys(b"UNSAVEDWORD\x1be", 0.8)
+            self.assertIn("Revision pack: every note in RevPack", screen)
+            if not lawnotes.find_tool("pandoc"):
+                s.keys(b"\x1b", 0.5)
+                self.assertTrue(s.quit())
+                return
+            screen = s.keys(b"Revision pack\r", 0.6)
+            self.assertIn("Word document", screen)
+            self.assertIn("with tables", screen)
+            s.keys(b"Word document\r", 0.4)
+            out = os.path.join(self.out, "RevPack revision pack.docx")
+            for _ in range(120):
+                if os.path.exists(out):
+                    break
+                s.out += s.read(0.1)
+            self.assertTrue(os.path.exists(out), s.out[-1500:].decode(errors="replace"))
+            self.assertTrue(s.quit())
+        finally:
+            try:
+                os.kill(s.pid, 9)
+            except OSError:
+                pass
+            try:
+                os.waitpid(s.pid, 0)
+            except OSError:
+                pass
+        if not lawnotes.find_tool("pandoc"):
+            return
+        import zipfile
+        doc = zipfile.ZipFile(out).read("word/document.xml").decode()
+        notes_xml = zipfile.ZipFile(out).read("word/footnotes.xml").decode()
+        text = re.sub(r"<[^>]+>", "", re.sub(r"</w:p>", "\n", doc))
+        self.assertLess(text.index("Acceptance"), text.index("Deep/Caparo"))
+        self.assertLess(text.index("Deep/Caparo"), text.index("Offer"))
+        self.assertLess(text.index("Offer"), text.index("UNSAVEDWORD"))
+        self.assertIn("Neighbour principle", notes_xml)
+        self.assertIn("Postal rule", notes_xml)
+        self.assertNotIn("HIDEME", doc + notes_xml)
+        self.assertNotIn("NOTINPACK", doc)
+        self.assertIn("UNSAVEDWORD", open(offer).read())          # the open note was saved
+        self.assertIn("HIDEME", open(older).read())               # the note itself is left alone
 
 
 if __name__ == "__main__":
