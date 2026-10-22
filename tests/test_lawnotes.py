@@ -1161,8 +1161,9 @@ class Session:
         self.out += out
         return re.sub(rb"\x1b\[[0-9;?<>]*[A-Za-z~]|\x1b\(B|\x1b[=>]", b" ", out).decode(errors="replace")
 
-    def quit(self, seconds=3):
-        """^Q, then wait for the editor to exit; kill it and return False if it doesn't."""
+    def quit(self, seconds=8):
+        """^Q, then wait for the editor to exit; kill it and return False if it doesn't. The exit
+        snapshots the shared test notes folder, which grows as the suite runs: hence the time."""
         self.keys(b"\x11", 1.5)
         for _ in range(int(seconds * 10)):
             if os.waitpid(self.pid, os.WNOHANG)[0] == self.pid:
