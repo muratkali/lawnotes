@@ -4,6 +4,7 @@ Run: python3 -m unittest discover -s tests -v
 """
 import json
 import os
+import shutil
 import random
 import tempfile
 import time
@@ -30,6 +31,20 @@ class NoteNameTests(unittest.TestCase):
         for bad in ("../../.ssh/config", "Tort/../../escape", "/../../etc/passwd", "a\x1b]52;c;x\x07"):
             with self.assertRaises(ValueError, msg=bad):
                 lawnotes.note_path(bad)
+
+    def test_no_hidden_notes_or_notes_over_icloud_placeholders(self):
+        for bad in (".abbreviations", "Tort/.revision.json", ".themes/Mine"):
+            with self.assertRaises(ValueError, msg=bad):
+                lawnotes.note_path(bad)
+        folder = os.path.join(lawnotes.NOTES_DIR, "Evicted")
+        os.makedirs(folder, exist_ok=True)
+        self.addCleanup(shutil.rmtree, folder)                      # other tests list the notes folder
+        open(os.path.join(folder, ".Duty.md.icloud"), "w").close()  # in iCloud, not on this Mac
+        with self.assertRaises(ValueError) as e:
+            lawnotes.note_path("Evicted/Duty")
+        self.assertIn("not downloaded", str(e.exception))
+        open(os.path.join(folder, "Duty.md"), "w").close()          # downloaded: fine
+        self.assertTrue(lawnotes.note_path("Evicted/Duty").endswith("Duty.md"))
 
     def test_requests_only_open_notes(self):
         os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)

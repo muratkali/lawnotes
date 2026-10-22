@@ -40,6 +40,7 @@ import contextlib
 import curses
 import datetime
 import difflib
+import errno
 import hashlib
 import json
 import locale
@@ -370,6 +371,7 @@ _CITE_TAIL = r"(?:\s+\((?:[A-Za-z.]+\s+)?\d{4}\)|\s+\([A-Za-z.]+\))?"  # (HL), (
 CITE_RE = re.compile(
     rf"{_YEAR}\s+(?:\d{{1,4}}\s+)?{_SERIES}(?:\s+\d{{1,4}}\s+{_SERIES}){{0,2}}\s+\d{{1,5}}{_CITE_TAIL}"
     rf"|{_YEAR}\s+\d{{1,5}}\s+\([A-Za-z.]+\)"  # [1986] 785 (HL), no series
+    rf"|{_YEAR}\s+ECR\s+I{{1,2}}-\d{{1,5}}"  # [1991] ECR I-5357
     rf"|\b(?!\d{{1,4}}\s+(?:AM|PM)\b)\d{{1,4}}\s+{_REPORT}\s+\d{{1,5}}{_CITE_TAIL}"  # 45 ER 1184, 161 A2d 69
 )
 # A provision: 2, 2A, 1.1, 2(1)(a), 1 (1), S1 (2); then more joined by and / or / to / , / –,
@@ -491,6 +493,14 @@ def wrap_starts(s, w):
 
 # Find and replace matches the exact text, capitals included: citations and case names are
 # case-sensitive ("[1932] AC 562", "Re Polemis").
+def saves_as_is(path, buf):
+    """Whether saving buf, as loaded from path, writes back exactly the bytes that are there."""
+    with open(path, "rb") as f:
+        data = f.read()
+    text = "\n".join(buf.lines) + "\n"
+    return data in (text.encode("utf-8"), text[:-1].encode("utf-8"))
+
+
 def replace_lines(lines, find, repl):
     """(lines with every `find` replaced by `repl`, how many were replaced)."""
     n = sum(line.count(find) for line in lines)
@@ -1274,7 +1284,7 @@ def load_abbreviations(path=None):
                         out[short.strip()] = long.strip()
                     else:
                         out.pop(short.strip(), None)  # "CL =" turns a built-in one off
-    except OSError:
+    except (OSError, UnicodeError):
         pass
     return out
 
@@ -1291,6 +1301,7 @@ def abbreviation_problem(short):
 
 
 SUGGESTED_MARK = "# Suggested from your notes"
+SUGGESTION_LINE = re.compile(r"# [A-Za-z][A-Za-z0-9]* = .*")
 
 
 def abbreviation_rejects(path=None):
@@ -1303,16 +1314,22 @@ def abbreviation_rejects(path=None):
                 short = short.strip()
                 if sep and short and not short.startswith("#") and abbreviation_problem(short):
                     out.append(f"{short} ({abbreviation_problem(short)})")
-    except OSError:
+    except (OSError, UnicodeError):
         pass
     return out
 
 
 def abbreviations_text(text, suggested):
-    """Your list with its suggestions block (the end of the file, from SUGGESTED_MARK) rewritten for
-    the suggestions that apply now; everything above it is left exactly as you wrote it."""
-    mine = text.split(SUGGESTED_MARK)[0].rstrip("\n") if text.strip() else (
-        ABBREV_HEADER + "".join(f"{s} = {l}\n" for s, l in DEFAULT_ABBREVIATIONS.items())).rstrip("\n")
+    """Your list with its suggestions block (the end of the file, from the line starting with
+    SUGGESTED_MARK) rewritten for the suggestions that apply now. Everything above it is left exactly
+    as you wrote it; lines of yours inside the block (a suggestion you un-commented) move above it."""
+    if not text.strip():
+        mine = (ABBREV_HEADER + "".join(f"{s} = {l}\n" for s, l in DEFAULT_ABBREVIATIONS.items())).rstrip("\n")
+    else:
+        lines = text.split("\n")
+        at = next((i for i, line in enumerate(lines) if line.startswith(SUGGESTED_MARK)), len(lines))
+        kept = [line for line in lines[at + 1:] if line.strip() and not SUGGESTION_LINE.fullmatch(line)]
+        mine = "\n".join(["\n".join(lines[:at]).rstrip("\n")] + kept).rstrip("\n")
     if not suggested:
         return mine + "\n"
     return (mine + "\n\n" + SUGGESTED_MARK + " (shorthand they already use). To use one, delete the # in front:\n"
@@ -1336,7 +1353,7 @@ def expand_abbreviation(line, cx, abbreviations):
     """If the word just before cx is an abbreviation, the line with it expanded and the new cursor
     column; else None. Whole words and exact case only (CLR and cl stay as they are)."""
     m = re.search(r"(?:^|(?<=[\s(\[\"'\u201c\u2018/]))([A-Za-z][A-Za-z0-9]*)$", line[:cx])
-    if not m or m.group(1) not in abbreviations:
+    if not m or m.group(1) not in abbreviations or line.rfind("[[", 0, cx) > line.rfind("]]", 0, cx):
         return None
     long = abbreviations[m.group(1)]
     return line[:m.start(1)] + long + line[cx:], m.start(1) + len(long)
@@ -1510,13 +1527,19 @@ def merge_progress(*stores):
     return out
 
 
-def read_progress(path):
+def read_progress(path, strict=False):
+    """The cards in a progress file; {} if there is none. An unreadable one (half-synced, damaged)
+    is also {}, or None when strict, so saving can leave it alone."""
     try:
         with open(path, encoding="utf-8") as f:
             cards = json.load(f).get("cards")
-        return cards if isinstance(cards, dict) else {}
-    except (OSError, ValueError, AttributeError):
+        if isinstance(cards, dict):
+            return cards
+    except FileNotFoundError:
         return {}
+    except (OSError, ValueError, AttributeError):
+        pass
+    return None if strict else {}
 
 
 def progress_copies():
@@ -1537,8 +1560,13 @@ def load_progress():
 def save_progress(updates):
     """Merge updates into the progress on disk (read again: another Mac may have written it since)
     and write it so it's never half-written. Returns the merged progress; raises OSError."""
-    copies = progress_copies()
-    merged = merge_progress(read_progress(REVISION_FILE), *(read_progress(p) for p in copies), updates)
+    current = read_progress(REVISION_FILE, strict=True)
+    if current is None:
+        raise OSError(errno.EIO, "your saved progress couldn't be read (iCloud may still be syncing it), "
+                                 "so it was left as it is")
+    copies = {p: read_progress(p, strict=True) for p in progress_copies()}
+    copies = {p: cards for p, cards in copies.items() if cards is not None}  # unreadable: kept, not merged
+    merged = merge_progress(current, *copies.values(), updates)
     os.makedirs(os.path.dirname(REVISION_FILE), exist_ok=True)
     tmp = REVISION_FILE + ".saving~"
     try:
@@ -1624,24 +1652,29 @@ class History:
             self.git("rm", "-r", "-q", "--cached", "--ignore-unmatch", ".")  # forget non-notes added before
 
     def snapshot(self, wait=False):
+        """Commit the notes as they are now. With wait, returns whether every note is now in history."""
         if not self.ok:
-            return
+            return False
         self.last = time.time()
 
         def work():
             with self.lock:
                 try:
                     self._ensure()
-                    self.git("add", "-A", ".")
+                    if self.git("add", "-A", ".").returncode != 0:
+                        raise OSError("git add failed")
                     if self.git("diff", "--cached", "--quiet").returncode == 1:
-                        self.git("commit", "-q", "-m", f"Snapshot {datetime.datetime.now():%Y-%m-%d %H:%M}")
+                        if self.git("commit", "-q", "-m",
+                                    f"Snapshot {datetime.datetime.now():%Y-%m-%d %H:%M}").returncode != 0:
+                            raise OSError("git commit failed")
                     self.export_bundle()
+                    return True
                 except (OSError, subprocess.SubprocessError) as e:
                     log(f"history snapshot failed: {type(e).__name__}: {e}")
+                    return False
         if wait:
-            work()
-        else:
-            threading.Thread(target=work, daemon=True).start()
+            return work()
+        threading.Thread(target=work, daemon=True).start()
 
     @staticmethod
     def mac_name():
@@ -2226,7 +2259,7 @@ class App:
         except (OSError, ValueError, TypeError):
             pass
         try:
-            with open(MESSAGE_FILE) as f:
+            with open(MESSAGE_FILE, encoding="utf-8", errors="replace") as f:
                 msg = f.read().strip()
             os.remove(MESSAGE_FILE)
             if msg:
@@ -3161,8 +3194,11 @@ class App:
             self.say(f"No cards in {name} yet: write a case brief (^T), or a bullet naming a case", 10)
             return
         if not queue:
-            when = min(progress[c["id"]]["due"] for c in mine)
-            day = datetime.date.fromisoformat(when).strftime("%a %d %b")
+            try:
+                when = min(progress[c["id"]]["due"] for c in mine)
+                day = datetime.date.fromisoformat(when).strftime("%a %d %b")
+            except (KeyError, TypeError, ValueError):  # a hand-edited or damaged progress file
+                day = "later"
             self.say(f"Nothing due in {name}: the next card is due {day}", 10)
             return
         tally, failed, shown, top, done = {1: 0, 2: 0, 3: 0}, None, False, 0, 0
@@ -3330,7 +3366,7 @@ class App:
         find = self.prompt("Replace: ", start)
         if not find:
             return
-        repl = self.prompt(f"Replace “{find}” with: ")
+        repl = self.prompt(f"Replace “{clipped(find)}” with: ")
         if repl is None:
             return
         if repl == find:
@@ -3403,8 +3439,8 @@ class App:
         others are saved the way the editor saves, after a version history snapshot so ^R can restore them."""
         self.say("Replacing in all notes…", 60)
         self.draw()
-        if any(buf is None for _, _, buf, _ in notes):
-            self.history.snapshot(wait=True)  # every note as it was, before anything changes
+        backed_up = (not any(buf is None for _, _, buf, _ in notes)
+                     or self.history.snapshot(wait=True))  # every note as it was, before anything changes
         panes = {id(b): p for p, b in self.buffers()}
         done, changed, problems = 0, 0, []
         for path, rel, buf, _ in notes:
@@ -3415,8 +3451,16 @@ class App:
                 if not saved:
                     problems.append((f"{rel} — couldn't be saved; the change is in its pane, not saved yet", path))
             else:
+                if not backed_up:
+                    problems.append((f"{rel} — not changed: version history isn't working, so it couldn't "
+                                     f"be kept first. Open the note to replace there", path))
+                    continue
                 try:
                     note = Buffer(path)
+                    if not saves_as_is(path, note):
+                        problems.append((f"{rel} — not changed: it has tabs, Windows line endings or "
+                                         f"another encoding. Open the note to replace there", path))
+                        continue
                     note.lines, n = replace_lines(note.lines, find, repl)
                     conflict = note.save() if n else None  # atomic; never over a newer version
                 except OSError as e:
@@ -3457,8 +3501,8 @@ class App:
                 break
             seen += 1
             self.anchor, b.cy, b.cx = (i, j), i, j + len(find)  # the view moves to it
-            key = self.ask(f"Replace with {instead}?  y yes · n skip · a all remaining · Esc stop"
-                           f"   ({seen} of {max(seen, total)})", "yna")
+            key = self.ask(f"({seen} of {max(seen, total)}) y replace · n skip · a all · Esc stop · "
+                           f"with {instead}", "yna")  # the keys first: a narrow pane cuts the end
             if key is None:
                 break
             if key == "n":
@@ -3588,7 +3632,8 @@ class App:
 
     def link_picker(self):
         """[[ typed: pick the note to link to; Enter writes its name and the closing ]]."""
-        names = [link_name(rel) for _, rel, _ in self.list_notes()]
+        names = [n for n in (link_name(rel) for _, rel, _ in self.list_notes())
+                 if not any(c in n for c in "#|[]")]  # a link can't hold these, so these notes can't be linked
 
         def build(query):
             words = query.lower().split()
@@ -3614,7 +3659,7 @@ class App:
         target, heading = m.group(1).strip(), (m.group(2) or "").strip()
         found = link_matches(target, self.link_targets(fresh=True))
         if not found:  # like ^N, with the name filled in
-            name = self.prompt(f"No note “{target}” yet. New note: ", target)
+            name = self.prompt(f"No note “{clipped(target)}” yet. New note: ", target)
             if not name or not name.strip("/ "):
                 return
             try:
@@ -3708,29 +3753,40 @@ class App:
                                                          self.abbreviations)
                     new = abbreviations_text(text, suggested)
                     if new != text:
-                        os.makedirs(os.path.dirname(ABBREV_FILE), exist_ok=True)
-                        tmp = ABBREV_FILE + ".tmp"
+                        target = os.path.realpath(ABBREV_FILE)  # write through a symlink
+                        os.makedirs(os.path.dirname(target), exist_ok=True)
+                        tmp = target + ".tmp"
                         with open(tmp, "w", encoding="utf-8") as f:
                             f.write(new)
                             f.flush()
                             os.fsync(f.fileno())
-                        os.replace(tmp, ABBREV_FILE)
+                        os.replace(tmp, target)
+                except UnicodeError:
+                    pass  # not UTF-8: opened as it is, suggestions left alone
                 except OSError as e:
                     self.say(f"Couldn't open your abbreviations ({e.strerror or e})", 8)
                     return
             if not (self.split("v", ABBREV_FILE) or self.split("h", ABBREV_FILE)):
-                self.open(ABBREV_FILE)  # no room for a second pane
+                note = self.buf.path
+                if self.open(ABBREV_FILE):  # no room for a second pane: here instead, ^O goes back
+                    self.say(f"No room for a second pane, so the list is here: ^S applies it, "
+                             f"^O goes back to {os.path.basename(note)}", 12)
+                    if not phrase:
+                        return
         b = self.buf
         if not same(b.path):
             return
         if phrase:
             end = next((i for i, line in enumerate(b.lines) if line.startswith(SUGGESTED_MARK)), len(b.lines))
-            while end > 0 and not b.lines[end - 1].strip():
+            while end > 1 and not b.lines[end - 1].strip():
                 end -= 1
-            b.cy, b.cx = end - 1, len(b.lines[end - 1])
+            b.cy, b.cx = max(end - 1, 0), len(b.lines[max(end - 1, 0)])
             b.insert(f"\n = {phrase}", kind="paste")
             b.cx = 0
-            self.say(f"Type the short form for “{phrase}”, then ^S. Option+W closes this pane", 12)
+            back = "Option+W closes this pane" if len(self.panes()) > 1 else "^O goes back to your note"
+            self.say(f"Type the short form for “{clipped(phrase)}”, then ^S. {back}", 12)
+        elif abbreviation_rejects():
+            self.say("Not used: " + "; ".join(abbreviation_rejects()), 15)
         else:
             self.say("SHORT = Long form, one per line; ^S applies them. Option+W closes this pane", 10)
 
@@ -3981,9 +4037,11 @@ class App:
                   ("Replace…", "Option+R", ["replace"]), ("Revision cards…", "Option+C", ["cards"]),
                   ("Abbreviations…", "Option+A", ["abbreviations"]),
                   ("Export…", "Option+E", ["export"]), ("Themes…", "Option+T", ["themes"])]
+        H, W = self.scr.getmaxyx()
+        if len(items) + 2 > H - 1:  # a short pane: no separators, and only what fits
+            items = [it for it in items if it][:max(1, H - 3)]
         choices = [i for i, it in enumerate(items) if it]
         width = max(len(it[0]) + len(it[1]) for it in items if it) + 5
-        H, W = self.scr.getmaxyx()
         top = sy + 1 if sy + 1 + len(items) + 2 <= H - 1 else max(0, sy - len(items) - 2)
         left = max(0, min(sx, W - width - 3))
         at = 0
@@ -4322,7 +4380,9 @@ class App:
                 path = take_request()  # the launcher asked for a note before this window opened
             if path:
                 self.open(path)
-            elif not self.open_picker():
+            if abbreviation_rejects():
+                self.say("Some of your abbreviations aren't used any more: Option+A shows which, and why", 10)
+            if not path and not self.open_picker():
                 self.exit_reason = "note list closed before opening a note (Esc or ^Q)"
                 return
             if time.time() >= self.msg_until:
@@ -4405,6 +4465,11 @@ def inside_notes(path):
     return os.path.realpath(path).startswith(notes + os.sep)
 
 
+def clipped(text, n=24):
+    """text, cut to n characters with … so a prompt fits a narrow pane."""
+    return text if len(text) <= n else text[:n - 1] + "…"
+
+
 def note_path(name):
     """A note name ('Tort/Duty') as a path in the notes folder. Raises ValueError for names that
     would leave the folder ('../../x') or contain control characters."""
@@ -4415,6 +4480,14 @@ def note_path(name):
         path += ".md"
     if not inside_notes(path):
         raise ValueError(f"“{name}” would be outside the notes folder")
+    parts = os.path.relpath(path, NOTES_DIR).split(os.sep)
+    if any(part.startswith(".") for part in parts):
+        raise ValueError("a note or folder name can't start with a dot")
+    if any(len(part.encode()) > 250 for part in parts):
+        raise ValueError("that name is too long for a file: keep each part under 250 letters")
+    folder, base = os.path.split(path)
+    if not os.path.exists(path) and os.path.exists(os.path.join(folder, f".{base}.icloud")):
+        raise ValueError(f"“{name}” is in iCloud but not downloaded to this Mac yet: open it in Finder, then try again")
     return path
 
 

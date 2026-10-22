@@ -472,9 +472,16 @@ class TextTests(unittest.TestCase):
         self.assertEqual((ab["EQ"], "CT" in ab, "AC" in ab, "C" in ab), ("Equity", False, False, False))
         self.assertEqual([r.split(" ")[0] for r in lawnotes.abbreviation_rejects(f)], ["AC", "C"])
         again = lawnotes.abbreviations_text(mine, [("CT", "constructive trust", 1)])  # only the block is rewritten
-        self.assertTrue(again.startswith(mine.split("# Suggested")[0].rstrip("\n") + "\n\n# Suggested"))
-        self.assertTrue(again.endswith("# CT = constructive trust\n"))
-        self.assertNotIn("AC = Appeal Cases", again)                    # (it sat after the mark, in the block)
+        self.assertTrue(again.startswith(mine.split("# Suggested")[0].rstrip("\n")
+                                         + "\nEQ = Equity\nAC = Appeal Cases\nC = claimant\n\n# Suggested"))
+        self.assertTrue(again.endswith("# CT = constructive trust\n"))  # lines of yours in the block move above it
+        self.assertEqual(lawnotes.abbreviations_text(again, []).count("EQ = Equity"), 1)
+        odd = "AA = after  # Suggested from your notes once\nBB = bb\n"  # the mark mid-line is just text
+        self.assertEqual(lawnotes.abbreviations_text("x\n" + odd, []), "x\n" + odd)
+        with open(f, "wb") as out:
+            out.write(b"EQ = \xe9quit\xe9\n")                       # not UTF-8: built-ins, no crash
+        self.assertEqual(lawnotes.load_abbreviations(f), lawnotes.DEFAULT_ABBREVIATIONS)
+        self.assertEqual(lawnotes.abbreviation_rejects(f), [])
         self.assertEqual(lawnotes.abbreviations_text("CL =\n", []), "CL =\n")  # nothing to suggest: as it was
         for short in ("AC", "QB", "LJ", "D", "C", "C T", "2x"):             # citations, judges, parties, junk
             self.assertIsNotNone(lawnotes.abbreviation_problem(short), short)
@@ -490,6 +497,14 @@ class TextTests(unittest.TestCase):
         self.assertEqual(found("D punched V. C sued D1 and D2."), ["D", "V", "C", "D1", "D2"])
         self.assertEqual(found("D's intention"), ["D's"])
         self.assertEqual(found("Part V of the Act; a C-section"), [])
+
+    def test_night_review_fixes(self):
+        self.assertEqual(lawnotes.CITE_RE.search("Francovich v Italy [1991] ECR I-5357").group(), "[1991] ECR I-5357")
+        self.assertEqual(lawnotes.authorities(["Case C-6/90 Francovich v Italy [1991] ECR I-5357"])["cases"],
+                         [("EU cases", [("Francovich v Italy", "[1991] ECR I-5357")])])
+        ab = lawnotes.DEFAULT_ABBREVIATIONS
+        self.assertIsNone(lawnotes.expand_abbreviation("see [[Tort/CL", 13, ab))  # inside a link
+        self.assertEqual(lawnotes.expand_abbreviation("[[Tort]] CL", 11, ab), ("[[Tort]] Common Law", 19))
 
     def test_wrap(self):
         self.assertEqual(lawnotes.wrap_starts("hello world foo", 8), (0, 6, 12))
@@ -603,6 +618,10 @@ class RevisionTests(unittest.TestCase):
         self.assertEqual(lawnotes.load_progress(), {})
         open(path, "w").write("{not json")
         self.assertEqual(lawnotes.load_progress(), {})              # damaged: starts again, no crash
+        with self.assertRaises(OSError):                            # ...but a rating never overwrites it
+            lawnotes.save_progress({"x": {"box": 3, "at": 100.0}})
+        self.assertEqual(open(path).read(), "{not json")
+        os.remove(path)
         lawnotes.save_progress({"x": {"box": 3, "at": 100.0}, "y": {"box": 1, "at": 50.0}})
         # another Mac: a later review of y, an older one of x, and an iCloud conflict copy
         copy = os.path.join(self.dir, ".revision 2.json")
@@ -612,6 +631,9 @@ class RevisionTests(unittest.TestCase):
         self.assertEqual({k: v["box"] for k, v in merged.items()}, {"x": 3, "y": 2, "z": 4, "w": 1})
         self.assertEqual(json.load(open(path))["cards"], merged)
         self.assertEqual(sorted(os.listdir(self.dir)), [".revision.json"])  # copy merged; no temp file left
+        open(copy, "w").write('{"cards": {"half')                  # an unreadable copy is kept, not merged
+        lawnotes.save_progress({"v": {"box": 1, "at": 130.0}})
+        self.assertEqual(sorted(os.listdir(self.dir)), [".revision 2.json", ".revision.json"])
 
     def test_history_leaves_progress_out(self):
         self.assertIn(".*", lawnotes.HISTORY_EXCLUDE.split("\n"))
@@ -760,6 +782,33 @@ class ReplaceTests(unittest.TestCase):
         h = app.history                                              # ^R has the closed notes as they were
         self.assertEqual(h.content(h.versions(c)[0][0], c), "See Donohue.\nDonohue twice: Donohue\n")
         self.assertEqual(sorted(os.listdir(os.path.dirname(c))), ["C.md"])  # no conflict or temp files
+
+    def test_all_notes_leaves_notes_a_save_would_change(self):
+        a = self.note("A.md", "Donohue\n")
+        raw = {p: open(p, "rb").read() for p in (
+            self.note("Tabs.md", "Donohue\n\tindented\n"), self.note("Win.md", "Donohue\r\nline\r\n"))}
+        latin = os.path.join(lawnotes.NOTES_DIR, "Latin.md")
+        open(latin, "wb").write(b"Donohue caf\xe9\n")
+        raw[latin] = open(latin, "rb").read()
+        bare = self.note("Bare.md", "Donohue")                       # no final newline: still fine
+        app = self.app(a)
+        app.replace_everywhere("Donohue", "Donoghue", app.notes_containing("Donohue"))
+        for p, data in raw.items():
+            self.assertEqual(open(p, "rb").read(), data, p)
+        self.assertEqual(open(bare).read(), "Donoghue\n")
+        self.assertIn("Replaced 2 in 2 notes", app.msg)
+        self.assertEqual(sorted(path for _, path in app.picks[0][1]), sorted(raw))
+        self.assertIn("tabs, Windows line endings or another encoding", app.picks[0][1][0][0])
+
+    def test_all_notes_needs_working_history(self):
+        a = self.note("A.md", "Donohue\n")
+        c = self.note("C.md", "Donohue\n")
+        open(lawnotes.HISTORY_DIR, "w").write("not a git store")      # history broken: closed notes wait
+        app = self.app(a)
+        app.replace_everywhere("Donohue", "Donoghue", app.notes_containing("Donohue"))
+        self.assertEqual(open(a).read(), "Donoghue\n")              # the open note: ^Z undoes it
+        self.assertEqual(open(c).read(), "Donohue\n")
+        self.assertIn("version history isn't working", app.picks[0][1][0][0])
 
 
 @unittest.skipUnless(lawnotes.find_tool("pandoc"), "export needs pandoc (brew install pandoc)")
