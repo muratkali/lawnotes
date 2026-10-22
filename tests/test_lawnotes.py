@@ -455,25 +455,30 @@ class TextTests(unittest.TestCase):
         self.assertEqual(lawnotes.load_abbreviations(f)["RA"], "reasonable adult")
         self.assertEqual(lawnotes.load_abbreviations(f)["CL"], "common law")    # yours win
 
-    def test_adding_and_removing_abbreviations(self):
+    def test_abbreviations_file_and_suggestions(self):
+        notes = [["In EQ, B holds on a RT for A", "a CT; [1932] AC 562; esp. here"], ["EQ again", "an ET/RT", "EQUITY"]]
+        suggested = lawnotes.abbreviation_suggestions(notes, {"RT": "resulting trust"})
+        self.assertEqual(suggested, [("EQ", "Equity", 2), ("CT", "constructive trust", 1), ("esp", "especially", 1)])
+        self.assertFalse(set(lawnotes.SUGGESTED_ABBREVIATIONS) & lawnotes.NEVER_EXPAND)
+        new = lawnotes.abbreviations_text("", suggested)                  # a new list: header, built-ins, suggestions
+        self.assertTrue(new.startswith("# Abbreviations"))
+        self.assertIn("CL = Common Law\nEL = Equity Law\nLCh = Lord Chancellor\n\n# Suggested from your notes", new)
+        self.assertTrue(new.endswith("# EQ = Equity\n# CT = constructive trust\n# esp = especially\n"))
+        mine = new.replace("# EQ = Equity", "EQ = Equity") + "AC = Appeal Cases\nC = claimant\n"
         f = os.path.join(tempfile.mkdtemp(dir=TMP), ".abbreviations.txt")
-        lawnotes.set_abbreviation("CT", "constructive trust", f)              # a new list starts with the header
-        self.assertTrue(open(f).read().startswith("# Abbreviations"))
-        lawnotes.set_abbreviation("RT", "resulting trust", f)
-        lawnotes.set_abbreviation("CT", "Constructive Trust", f)              # changed in place
-        lawnotes.set_abbreviation("RT", None, f)                              # removed
-        lawnotes.set_abbreviation("EL", None, f)                              # a built-in one: turned off
+        with open(f, "w") as out:
+            out.write(mine)
         ab = lawnotes.load_abbreviations(f)
-        self.assertEqual((ab["CT"], "RT" in ab, "EL" in ab, ab["CL"]), ("Constructive Trust", False, False, "Common Law"))
-        self.assertEqual([l for l in open(f).read().splitlines() if not l.startswith("#")], ["CT = Constructive Trust", "EL ="])
-        self.assertEqual(os.listdir(os.path.dirname(f)), [".abbreviations.txt"])  # no temp file left
+        self.assertEqual((ab["EQ"], "CT" in ab, "AC" in ab, "C" in ab), ("Equity", False, False, False))
+        self.assertEqual([r.split(" ")[0] for r in lawnotes.abbreviation_rejects(f)], ["AC", "C"])
+        again = lawnotes.abbreviations_text(mine, [("CT", "constructive trust", 1)])  # only the block is rewritten
+        self.assertTrue(again.startswith(mine.split("# Suggested")[0].rstrip("\n") + "\n\n# Suggested"))
+        self.assertTrue(again.endswith("# CT = constructive trust\n"))
+        self.assertNotIn("AC = Appeal Cases", again)                    # (it sat after the mark, in the block)
+        self.assertEqual(lawnotes.abbreviations_text("CL =\n", []), "CL =\n")  # nothing to suggest: as it was
         for short in ("AC", "QB", "LJ", "D", "C", "C T", "2x"):             # citations, judges, parties, junk
             self.assertIsNotNone(lawnotes.abbreviation_problem(short), short)
         self.assertIsNone(lawnotes.abbreviation_problem("DoC"))
-        notes = [["In EQ, B holds on a RT for A", "a CT; [1932] AC 562; esp. here"], ["EQ again", "an ET/RT", "EQUITY"]]
-        self.assertEqual(lawnotes.abbreviation_suggestions(notes, {"RT": "resulting trust"}),
-                         [("EQ", "Equity", 2), ("CT", "constructive trust", 1), ("esp", "especially", 1)])
-        self.assertFalse(set(lawnotes.SUGGESTED_ABBREVIATIONS) & lawnotes.NEVER_EXPAND)
 
     def test_highlight_markup(self):
         spans = lambda t: [m.group() for m in lawnotes.MARK_RE.finditer(t)]
@@ -1137,7 +1142,7 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(s.quit())
         self.assertEqual(open(note).read(), "x The Common Law and Equity Law; the Lord Chancellor. CL pasted  CLR\n")
 
-    def test_option_a_abbreviations(self):
+    def test_option_a_opens_abbreviations_beside_the_note(self):
         note = os.path.join(lawnotes.NOTES_DIR, "Trusts", "Abbrev.md")
         os.makedirs(os.path.dirname(note), exist_ok=True)
         open(note, "w").write("In EQ, B holds on a constructive trust\n")
@@ -1145,22 +1150,39 @@ class SessionTests(unittest.TestCase):
         self.assertFalse(os.path.exists(mine))
         try:
             s = Session(note)
-            screen = s.keys(b"\x1ba", 0.8)                                  # Option+A
-            self.assertIn("EQ → Equity   suggested: used 1× in your notes", screen)
-            self.assertIn("CL → Common Law", screen)
-            s.keys(b"EQ \xe2\x86\x92\r", 0.5)                               # filter to the suggestion, Enter
-            s.keys(b"\r", 0.5)                                               # keep "Equity"
-            # select "constructive trust" (Shift+End from its start) and abbreviate it
+            # select "constructive trust" (Shift+End from its start), then Option+A
             s.keys(b"\x01" + b"\x1b[1;3C" * 6 + b"\x1b[1;2F", 0.3)
-            screen = s.keys(b"\x1ba", 0.8)
-            self.assertIn("+ Abbreviation for “constructive trust”…", screen)
-            s.keys(b"\r", 0.4)
-            s.keys(b"CT\r", 0.5)
-            s.keys(b"\x1b[1;2F\x05 so EQ and CT.\x13", 0.6)                  # both expand straight away
+            screen = s.keys(b"\x1ba", 1.0)
+            self.assertIn("In EQ, B holds", screen)                         # the note stays in view
+            self.assertIn("LCh = Lord Chancellor", screen)                  # beside the list
+            self.assertIn("# EQ = Equity", screen)                          # suggested from the note
+            self.assertIn(" = constructive trust", screen)                  # a line for it, waiting for its short form
+            self.assertIn("Type the short", screen)
+            screen = s.keys(b"CT\x13", 0.6)
+            self.assertIn("Abbreviations updated", screen)
+            s.keys(b"\x1bw", 0.6)                                          # Option+W: back to the note alone
+            s.keys(b"\x1b[1;2F\x05 so CT and EL.\x13", 0.6)                 # the new one expands straight away
             self.assertTrue(s.quit())
-            self.assertEqual(open(note).read(), "In EQ, B holds on a constructive trust so Equity and constructive trust.\n")
-            self.assertEqual([l for l in open(mine).read().splitlines() if not l.startswith("#")],
-                             ["EQ = Equity", "CT = constructive trust"])
+            self.assertEqual(open(note).read(), "In EQ, B holds on a constructive trust so constructive trust and Equity Law.\n")
+            lines = open(mine).read().splitlines()
+            self.assertEqual(lines[2:7], ["CL = Common Law", "EL = Equity Law", "LCh = Lord Chancellor", "CT = constructive trust", ""])
+            self.assertEqual(lines[-1], "# EQ = Equity")
+        finally:
+            if os.path.exists(mine):
+                os.remove(mine)
+
+    def test_option_a_in_a_narrow_pane_stacks_the_list(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Narrow.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        open(note, "w").write("narrow note\n")
+        mine = os.path.join(lawnotes.NOTES_DIR, ".abbreviations.txt")
+        try:
+            s = Session(note, size=(40, 40))
+            screen = s.keys(b"\x1ba", 1.0)
+            self.assertIn("narrow note", screen)                            # above
+            self.assertIn("CL = Common Law", screen)                        # below
+            s.keys(b"\x1bw", 0.4)
+            self.assertTrue(s.quit())
         finally:
             if os.path.exists(mine):
                 os.remove(mine)

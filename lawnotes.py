@@ -1269,7 +1269,7 @@ def load_abbreviations(path=None):
         with open(path or ABBREV_FILE, encoding="utf-8") as f:
             for line in f:
                 short, sep, long = line.partition("=")
-                if sep and short.strip() and not short.strip().startswith("#"):
+                if sep and short.strip() and not short.strip().startswith("#") and not abbreviation_problem(short.strip()):
                     if long.strip():
                         out[short.strip()] = long.strip()
                     else:
@@ -1290,32 +1290,33 @@ def abbreviation_problem(short):
     return None
 
 
-def set_abbreviation(short, long, path=None):
-    """Add or change one abbreviation in your list (long=None removes it), keeping the rest of the
-    file as it is; written whole, so iCloud never syncs half a list."""
-    path = path or ABBREV_FILE
+SUGGESTED_MARK = "# Suggested from your notes"
+
+
+def abbreviation_rejects(path=None):
+    """["AC (why)", …] for lines in your list that can't be abbreviations, so aren't used."""
+    out = []
     try:
-        with open(path, encoding="utf-8") as f:
-            lines = f.read().splitlines()
-    except FileNotFoundError:
-        lines = ABBREV_HEADER.splitlines()
-    mine = lambda line: (line.partition("=")[1] and not line.lstrip().startswith("#")
-                         and line.partition("=")[0].strip() == short)
-    new = None if long is None and short not in DEFAULT_ABBREVIATIONS else f"{short} = {long or ''}".rstrip()
-    found = [i for i, line in enumerate(lines) if mine(line)]
-    for i in reversed(found[1:]):
-        del lines[i]
-    if found:
-        lines[found[0]:found[0] + 1] = [new] if new is not None else []
-    elif new is not None:
-        lines.append(new)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+        with open(path or ABBREV_FILE, encoding="utf-8") as f:
+            for line in f:
+                short, sep, _ = line.partition("=")
+                short = short.strip()
+                if sep and short and not short.startswith("#") and abbreviation_problem(short):
+                    out.append(f"{short} ({abbreviation_problem(short)})")
+    except OSError:
+        pass
+    return out
+
+
+def abbreviations_text(text, suggested):
+    """Your list with its suggestions block (the end of the file, from SUGGESTED_MARK) rewritten for
+    the suggestions that apply now; everything above it is left exactly as you wrote it."""
+    mine = text.split(SUGGESTED_MARK)[0].rstrip("\n") if text.strip() else (
+        ABBREV_HEADER + "".join(f"{s} = {l}\n" for s, l in DEFAULT_ABBREVIATIONS.items())).rstrip("\n")
+    if not suggested:
+        return mine + "\n"
+    return (mine + "\n\n" + SUGGESTED_MARK + " (shorthand they already use). To use one, delete the # in front:\n"
+            + "".join(f"# {s} = {l}\n" for s, l, _ in suggested))
 
 
 def abbreviation_suggestions(notes, current):
@@ -1840,7 +1841,7 @@ HELP = [
     ("Right-click", "A menu: fixes for a misspelt word, cut / copy / paste, highlight, italic, bold, undo, split panes, export, themes."),
     ("//", "A comment to yourself: everything after // on a line is highlighted, and left out when you export."),
     ("CL  EL  LCh", "Abbreviations expand as you type: CL → Common Law, EL → Equity Law, LCh → Lord Chancellor. ^Z undoes an expansion."),
-    ("Option+A", "Abbreviations: add your own (select a phrase first to abbreviate it), change or remove one, or take a suggestion from the shorthand your notes already use (EQ, CT, esp…)."),
+    ("Option+A", "Your abbreviations, in a pane beside the note: one  SHORT = Long form  per line, ^S applies them, Option+W closes the pane. At the end are suggestions from the shorthand your notes already use (EQ, CT, esp…): delete the # to use one. Select a phrase first to make an abbreviation for it."),
     ("Tables", "Copy a table in Word and paste it (⌘V or ^V): it becomes a Markdown table with lined-up columns, and exports back to Word as a real table."),
     ("^C  ^X  ^V", "Copy / cut / paste using the Mac clipboard: what you copy flashes green. With nothing selected, ^C and ^X take the whole line. ⌘V pastes too, but ⌘C can't copy text selected inside Law Notes (Terminal takes ⌘C): use ^C."),
     ("Typing", "With text selected, typing or Backspace replaces it."),
@@ -2152,6 +2153,9 @@ class App:
             return False
         if os.path.realpath(b.path) == os.path.realpath(ABBREV_FILE):
             self.abbreviations = load_abbreviations()
+            rejects = abbreviation_rejects()
+            if not note and (announce or rejects):
+                note = ("Not used: " + "; ".join(rejects)) if rejects else "Abbreviations updated ✓"
         theme_ok = None
         if os.path.realpath(b.path) == os.path.realpath(theme_path(self.theme)):
             theme_ok = self.apply_theme(self.theme)  # the theme in use: show the change now
@@ -2412,12 +2416,14 @@ class App:
                 out.append((p, b))
         return out
 
-    def split(self, kind):
-        """Option+D (side by side) or Option+Shift+D (stacked): the new pane opens the note list."""
+    def split(self, kind, path=None):
+        """Option+D (side by side) or Option+Shift+D (stacked): the new pane opens the note list,
+        or the note at path. False if there's no room."""
         rect = self.pane.rect
         if (kind == "v" and rect[3] < 50) or (kind == "h" and rect[2] < 8):
-            self.say("Not enough room to split this pane", 5)
-            return
+            if not path:
+                self.say("Not enough room to split this pane", 5)
+            return False
         self.store_view()
         new = Pane()
         for a in self.VIEW_ATTRS:  # starts on the same note, same place
@@ -2426,8 +2432,11 @@ class App:
         self.layout.replace(self.pane, Layout(kind, Layout.leaf(self.pane), Layout.leaf(new)))
         self.load_view(new)
         self.draw()  # lays out the panes, so the new one has its place
-        if not self.open_picker(pane=self.pane):
+        if path:
+            self.open(path)
+        elif not self.open_picker(pane=self.pane):
             self.say("Both panes show this note; Option+W closes a pane", 5)
+        return True
 
     def close_pane(self):
         if len(self.panes()) == 1:
@@ -3679,65 +3688,51 @@ class App:
             return None
         return (a, c) if a < c else (c, a)
 
-    def abbreviations_menu(self):
-        """Option+A: your abbreviations, with suggestions from the shorthand your notes already use.
-        With a phrase selected, the first choice makes an abbreviation for it."""
+    def edit_abbreviations(self):
+        """Option+A: your list of abbreviations in a pane beside the note (below it when the pane is
+        narrow), ending with suggestions from the shorthand your notes already use. With a phrase
+        selected, a new line for it waits for you to type its short form. Saving it applies it."""
         phrase = self.selected_text().strip() if self.selection() else ""
         if "\n" in phrase or len(phrase) > 80:
             phrase = ""
-        suggested = abbreviation_suggestions([lines for _, _, lines in self.all_notes()], self.abbreviations)
-
-        def build(query):
-            items = [(f"+ Abbreviation for “{phrase}”…", ("new", phrase))] if phrase else []
-            items.append(("+ New abbreviation…", ("new", "")))
-            items += [(f"{s} → {l}   suggested: used {n}× in your notes", ("suggested", s, l)) for s, l, n in suggested]
-            items += [(f"{s} → {l}", ("change", s, l))
-                      for s, l in sorted(self.abbreviations.items(), key=lambda kv: kv[0].lower())]
-            items.append(("Edit the list as a note", ("file",)))
-            return [it for it in items if query.lower() in it[0].lower()]
-
-        choice = self.pick("Abbreviations", build, guide="They expand when you finish the word (space, punctuation, "
-                           "Enter); ^Z undoes one. Exact case, whole words only.")
-        if not choice:
-            return
-        if choice[0] == "file":
-            if not os.path.exists(ABBREV_FILE):
-                try:
-                    os.makedirs(os.path.dirname(ABBREV_FILE), exist_ok=True)
-                    with open(ABBREV_FILE, "w", encoding="utf-8") as f:
-                        f.write(ABBREV_HEADER + "".join(f"{s} = {l}\n" for s, l in DEFAULT_ABBREVIATIONS.items()))
+        self.anchor = None
+        same = lambda path: os.path.realpath(path) == os.path.realpath(ABBREV_FILE)
+        there = [p for p in self.panes() if p is not self.pane and p.buf and same(p.buf.path)]
+        if there:
+            self.activate(there[0])
+        elif not same(self.buf.path):
+            if not os.path.exists(ABBREV_FILE) or not any(same(b.path) for _, b in self.buffers()):
+                try:  # refresh the suggestions, unless the list is open with changes of yours
+                    text = open(ABBREV_FILE, encoding="utf-8").read() if os.path.exists(ABBREV_FILE) else ""
+                    suggested = abbreviation_suggestions([lines for _, _, lines in self.all_notes()],
+                                                         self.abbreviations)
+                    new = abbreviations_text(text, suggested)
+                    if new != text:
+                        os.makedirs(os.path.dirname(ABBREV_FILE), exist_ok=True)
+                        tmp = ABBREV_FILE + ".tmp"
+                        with open(tmp, "w", encoding="utf-8") as f:
+                            f.write(new)
+                            f.flush()
+                            os.fsync(f.fileno())
+                        os.replace(tmp, ABBREV_FILE)
                 except OSError as e:
-                    self.say(f"Couldn't make the list ({e.strerror or e})", 8)
+                    self.say(f"Couldn't open your abbreviations ({e.strerror or e})", 8)
                     return
-            self.open(ABBREV_FILE)
+            if not (self.split("v", ABBREV_FILE) or self.split("h", ABBREV_FILE)):
+                self.open(ABBREV_FILE)  # no room for a second pane
+        b = self.buf
+        if not same(b.path):
             return
-        if choice[0] == "new":
-            long = choice[1]
-            short = self.prompt(f"Short form for “{long}”: " if long else "Short form (e.g. CT): ")
-            short = (short or "").strip()
-            if not short:
-                return
-            problem = abbreviation_problem(short)
-            if problem:
-                self.say(problem, 8)
-                return
-            long = long or (self.prompt(f"“{short}” expands to: ", self.abbreviations.get(short, "")) or "").strip()
-            if not long:
-                return
+        if phrase:
+            end = next((i for i, line in enumerate(b.lines) if line.startswith(SUGGESTED_MARK)), len(b.lines))
+            while end > 0 and not b.lines[end - 1].strip():
+                end -= 1
+            b.cy, b.cx = end - 1, len(b.lines[end - 1])
+            b.insert(f"\n = {phrase}", kind="paste")
+            b.cx = 0
+            self.say(f"Type the short form for “{phrase}”, then ^S. Option+W closes this pane", 12)
         else:
-            short = choice[1]
-            hint = " (empty removes it)" if choice[0] == "change" else ""
-            long = self.prompt(f"“{short}” expands to{hint}: ", choice[2])
-            if long is None or (not long.strip() and choice[0] == "suggested"):
-                return
-            long = long.strip() or None
-        try:
-            set_abbreviation(short, long)
-        except OSError as e:
-            self.say(f"Couldn't save the abbreviation ({e.strerror or e})", 8)
-            return
-        self.abbreviations = load_abbreviations()
-        self.say(f"{short} → {long} ✓" if long else f"{short} removed ✓")
+            self.say("SHORT = Long form, one per line; ^S applies them. Option+W closes this pane", 10)
 
     def selected_text(self):
         (y1, x1), (y2, x2) = self.selection()
@@ -4245,7 +4240,7 @@ class App:
         elif key in ("themes", curses.KEY_F6):
             self.choose_theme()
         elif key == "abbreviations":
-            self.abbreviations_menu()
+            self.edit_abbreviations()
         elif key in ("cards", curses.KEY_F7):
             self.revise()
         elif key == "links":
