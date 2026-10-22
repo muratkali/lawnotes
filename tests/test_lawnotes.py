@@ -868,6 +868,52 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(lawnotes.export_markdown(["*Re Polemis* applies"]).strip(), "*Re Polemis* applies")
 
 
+class OscolaTests(unittest.TestCase):
+    def test_likely_slips_and_fixes(self):
+        lines = ["Donoghue v. Stevenson (1932) AC 562; R vs Smith [2020] UKSC 1",
+                 "Caparo vs. Dickman [1990] A.C. 605, p. 12",
+                 "s. 2; ss. 3; para. 4",
+                 "[^1]: See Donoghue v Stevenson [1932] QB 1"]
+        issues = lawnotes.oscola_issues(lines)
+        self.assertEqual([item[3] for item in issues],
+                         ["Use v, not v.", "Use square brackets", "Use v, not vs",
+                          "Use v, not vs.", "Remove full stops", "Drop p. for page",
+                          "Remove provision stop", "Remove provision stop", "Remove provision stop",
+                          "Add final full stop"])
+        for i, start, end, _, fix in reversed(issues):
+            lines[i] = lines[i][:start] + fix + lines[i][end:]
+        self.assertEqual(lines, ["Donoghue v Stevenson [1932] AC 562; R v Smith [2020] UKSC 1",
+                                 "Caparo v Dickman [1990] AC 605, 12",
+                                 "s 2; ss 3; para 4",
+                                 "[^1]: See Donoghue v Stevenson [1932] QB 1."])
+        self.assertEqual(lawnotes.oscola_issues(lines), [])
+
+    def test_correct_citations_and_ignored_text(self):
+        lines = ["Donoghue v Stevenson [1932] AC 562",
+                 "Example v Other (1868) LR 3 HL 330",
+                 "Example v Other (2020) 1 WLR 100",
+                 "R v Smith [2020] UKSC 1; s 2; para 3",
+                 "[^1]: The judgment ends here.",
+                 "[^2]: ‘ibid.’",
+                 "`Donoghue v. Stevenson (1932) AC 562`",
+                 "See https://example.test/x // Donoghue vs Stevenson and s. 2",
+                 "The A.C. was on; p. 12 of the essay"]
+        self.assertEqual(lawnotes.oscola_issues(lines), [])
+
+    def test_year_series_with_no_volume_number(self):
+        for series in ("AC", "QB", "KB", "Ch", "Fam", "WLR", "All ER", "UKSC", "UKHL",
+                       "UKPC", "EWCA", "EWCA Civ", "EWCA Crim", "EWHC"):
+            with self.subTest(series=series):
+                self.assertEqual([issue[3] for issue in lawnotes.oscola_issues([f"(2001) {series} 12"])],
+                                 ["Use square brackets"])
+
+    def test_dotted_report_series(self):
+        for series in ("A.C.", "Q.B.", "W.L.R."):
+            with self.subTest(series=series):
+                self.assertEqual([issue[3] for issue in lawnotes.oscola_issues([f"[2001] {series} 12"])],
+                                 ["Remove full stops"])
+
+
 class Session:
     """The editor running in a pseudo-terminal, driven by keystrokes."""
 
@@ -929,6 +975,27 @@ class Session:
 
 
 class SessionTests(unittest.TestCase):
+    def test_oscola_keys_fix_undo_and_jump_in_narrow_pane(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "OSCOLA.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        original = "Donoghue v. Stevenson [1932] AC 562\nCaparo v. Dickman [1990] AC 605\n"
+        open(note, "w").write(original)
+        s = Session(note, size=(40, 40))
+        screen = s.keys(b"\x1bk", 0.6)
+        self.assertIn("OSCOLA", screen)
+        self.assertIn("Use v, not v.", screen)
+        screen = s.keys(b"f", 0.6)
+        self.assertIn("Caparo v. Dickman", screen)  # the list was rebuilt after the first fix
+        screen = s.keys(b"f", 0.6)
+        self.assertIn("No OSCOLA slips found in this note", screen)
+        s.keys(b"\x1a\x1a", 0.4)  # each fix has its own undo step
+        screen = s.keys(b"\x1b[20~", 0.6)
+        self.assertIn("Use v, not v.", screen)
+        s.keys(b"\rX\x13", 0.5)
+        self.assertTrue(s.quit())
+        self.assertEqual(open(note).read(), "Donoghue Xv. Stevenson [1932] AC 562\n"
+                           "Caparo v. Dickman [1990] AC 605\n")
+
     def test_double_and_triple_click(self):
         note = os.path.join(lawnotes.NOTES_DIR, "Click.md")
         os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
