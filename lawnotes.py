@@ -30,6 +30,7 @@ Keys (press ^G inside the editor for this list)
   ^P search all notes   ^B case index (every case across all notes)
   ^R version history — restore an earlier version of this note
   Option+C revision cards — revise the cases in your notes (F7 also works)
+  Option+X exam mode — timed essay or problem question (F8 also works)
   Shift+arrows select   ^C copy   ^X cut   ^V paste (Mac clipboard); click to place the cursor
   ^K cut line    ^U paste lines   ^Z undo          ^Y redo
   ^A / ^E line start / end        Option/Ctrl+arrows move by word
@@ -460,6 +461,13 @@ MARK_RE = re.compile(r"==(?=\S).+?(?<=\S)==")
 # A link to another note: [[Folder/Name]], [[Folder/Name#Heading]], [[Folder/Name|shown text]];
 # groups: the note, the heading, the shown text
 LINK_RE = re.compile(r"\[\[\s*([^\s\[\]|#][^\[\]|#]*)(?:#([^\[\]|]*))?(?:\|([^\[\]]*))?\]\]")
+# A footnote definition is a note, not part of the essay. [^1] in the text is only a reference.
+FOOTNOTE_DEF_RE = re.compile(r"^[ \t]*\[\^[0-9]+\]:")
+FOOTREF_RE = re.compile(r"\[\^[0-9]+\]")
+IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)\s]*\)")          # ![alt](url)
+MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)\s]*\)")         # [text](url)
+FENCE_RE = re.compile(r"^[ \t]*```")
+RULE_RE = re.compile(r"^[ \t]*[|:=>-][ \t|:=>-]*$")         # ---, ===, | --- |, a bare >
 # Abbreviations expand when a word is finished (space, punctuation, Enter); add your own with
 # Option+A, or in ABBREV_FILE, one "SHORT = Long form" per line ("SHORT =" turns a built-in one off).
 DEFAULT_ABBREVIATIONS = {"CL": "Common Law", "EL": "Equity Law", "LCh": "Lord Chancellor"}
@@ -517,6 +525,99 @@ def link_text(m):
     """What a link reads as in an export: its shown text, or the note's name."""
     name = link_name(m.group(1).strip().rstrip("/")).rpartition("/")[2]
     return (m.group(3) or "").strip() or name
+
+
+def body_words(lines):
+    """Words in the note's body, for a timed essay.
+
+    // comments are left out, and so is a whole [^n]: footnote line. Markdown markers
+    are not words: headings, bullets and quotes, *italic*, **bold**, ==highlight==,
+    `code`, rules and table rules. A link counts as the words it shows. [^1] in the
+    text is a reference, not a word."""
+    total = 0
+    for raw in lines:
+        line = COMMENT_RE.sub("", raw)
+        if not line.strip() or FOOTNOTE_DEF_RE.match(line) or FENCE_RE.match(line) or RULE_RE.match(line):
+            continue
+        if "[[" in line:
+            line = LINK_RE.sub(link_text, line)
+        line = IMAGE_RE.sub(r"\1", line)
+        line = MD_LINK_RE.sub(r"\1", line)
+        line = FOOTREF_RE.sub(" ", line)
+        m = BULLET_RE.match(line)
+        if m:
+            line = line[m.end():]
+        else:
+            m = HEADING_RE.match(line)
+            if m:
+                line = line[m.end():]
+        line = re.sub(r"\s+#+\s*$", "", line)
+        line = line.replace("|", " ").replace("**", "").replace("__", "").replace("==", "")
+        line = re.sub(r"`+|(?<!\w)[*_]+|[*_]+(?!\w)|[\[\]]+", "", line)
+        total += len(line.split())
+    return total
+
+
+def exam_clock(seconds):
+    """Time left: h:mm:ss from an hour up, otherwise mm:ss."""
+    h, rem = divmod(max(0, int(seconds)), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def exam_over(seconds):
+    """How long since the end: +3:12, or +h:mm:ss from an hour on."""
+    h, rem = divmod(max(0, int(seconds)), 3600)
+    m, s = divmod(rem, 60)
+    return f"+{h}:{m:02d}:{s:02d}" if h else f"+{m}:{s:02d}"
+
+
+def exam_words_text(words, limit, running):
+    """1,214/2,000 words while a limit is still running; otherwise 1,987 words."""
+    if running and limit:
+        return f"{words:,}/{limit:,} words"
+    if words == 1:
+        return "1 word"
+    return f"{words:,} words"
+
+
+def exam_status(remaining, words, limit):
+    """(status text, the count inside it, whether the count is over the limit).
+    remaining > 0 while the exam runs; at 0 and below, time is up."""
+    over = limit is not None and words > limit
+    if remaining > 0:
+        count = exam_words_text(words, limit, True)
+        return f"{exam_clock(remaining)}  {count}", count, over
+    count = exam_words_text(words, limit, False)
+    return f"Time's up · {count} · {exam_over(-remaining)}", count, over
+
+
+def exam_warning(minutes, remaining, told10, told5):
+    """The one-off note when the clock first shows 10 or 5 minutes, or None.
+    An exam that started on that minute doesn't announce it straight away.
+    Returns (message or None, told10, told5)."""
+    if remaining <= 0:
+        return None, True, True
+    left, span = int(remaining), minutes * 60
+    if left <= 300 and not told5 and span > 300:
+        return "5 minutes left", True, True
+    if left <= 600 and not told10 and span > 600:
+        return "10 minutes left", True, told5
+    return None, told10, told5
+
+
+def exam_bar_text(name, message, essential, width):
+    """One status line of `width` columns. The clock and the count stay whole, on the right.
+    A note such as "10 minutes left" comes before the note's name, which is cut first."""
+    if width <= 0:
+        return ""
+    essential = essential[:width]
+    room = width - len(essential)
+    parts = [p for p in (message, name) if p]
+    left = (" " + "  ".join(parts)) if parts else ""
+    if len(left) > room:
+        left = left[:room]
+    return left.ljust(room) + essential
 
 
 def pair_of(attr):
@@ -589,6 +690,7 @@ class Buffer:
         self._after = None  # cursor position after the last edit: moving away starts a new undo step
         self.version = 0    # bumped on every change, so derived values (word count) can be cached
         self._words = (None, 0)
+        self._body = (None, 0)
         if os.path.exists(path):
             self.load()
 
@@ -694,6 +796,13 @@ class Buffer:
         if self._words[0] != key:
             self._words = (key, sum(len(l.split()) for l in self.lines))
         return self._words[1]
+
+    def body_word_count(self):
+        """Body words for an exam, recounted only after a change (the status reads it every frame)."""
+        key = (self.version, len(self.lines))
+        if self._body[0] != key:
+            self._body = (key, body_words(self.lines))
+        return self._body[1]
 
     def undo(self):
         return self._swap(self.undo_stack, self.redo_stack)
@@ -1956,6 +2065,7 @@ class Pane:
         self.rows, self.left, self.wrapw = 20, 0, 80
         self.cy = self.cx = 0
         self.rect = (0, 0, 24, 80)  # top, left, height, width on screen
+        self.exam = None             # timed exam on this pane, or None; closing the pane drops it
 
 
 class Layout:
@@ -2063,6 +2173,7 @@ HELP = [
     ("^L", "Outline: jump to any heading or case in this note."),
     ("#", "Revising"),
     ("Option+C", "Revision cards from your notes: each case brief (^T) is a card (the case and citation on the front, the brief on the back), and so is a bullet that names a case and says something about it. Choose this note, its folder or all notes. Space shows the answer; then 1 again, 2 hard, 3 good. Cards come back after 1, 3, 7, 14, 30, then 60 days; due cards first, then new ones. Esc ends. Progress is kept in UCL Notes, so every Mac shares it. F7 does the same."),
+    ("Option+X", "Exam mode for a timed essay or problem question. It asks how many minutes, then a word limit (leave the limit blank for none); Esc cancels either. The status bar shows the time left and the words in the note, or after the end how long since (Time's up). The count is the body only: // comments, footnote lines ([^1]: …) and Markdown markers are left out — headings, bullets, *italic*, **bold**, ==highlights==, `code`, links and [^1] references. The words a link shows are counted. It tells you once at 10 minutes and once at 5. Past the limit the count uses the theme's warning colour. You can keep writing the whole time. Option+X again asks whether to stop. Closing the pane or quitting ends it. F8 does the same."),
     ("#", "Moving around"),
     ("^F", "Find. Press ^F and Enter again (or F3) for the next match; Esc clears the highlight."),
     ("Option+R", "Find and replace, e.g. Donohue → Donoghue. Type what to replace (it starts as the selected text or your ^F search) and what to put instead, then choose: this note, all notes, or one match at a time (y replace, n skip, a all the rest, Esc stop). Capitals must match exactly. The replacements stay highlighted until Esc. ^Z undoes a replace in an open note; other notes are saved in version history first, so ^R can restore them. F4 does the same."),
@@ -2075,7 +2186,7 @@ HELP = [
     ("Shift+arrows", "Select text (Shift+Option+arrows selects by word). Click with the mouse to place the cursor, drag to select."),
     ("Double-click", "Selects a word, or a whole case name, citation or statute. Triple-click selects the line."),
     ("Scroll", "The mouse wheel moves the view only; the cursor stays where it was, and typing carries on there."),
-    ("Right-click", "A menu: fixes for a misspelt word, cut / copy / paste, highlight, italic, bold, undo, split panes, export, themes."),
+    ("Right-click", "A menu: fixes for a misspelt word, cut / copy / paste, highlight, italic, bold, undo, split panes, exam, export, themes."),
     ("//", "A comment to yourself: everything after // on a line is highlighted, and left out when you export."),
     ("CL  EL  LCh", "Abbreviations expand as you type: CL → Common Law, EL → Equity Law, LCh → Lord Chancellor. ^Z undoes an expansion."),
     ("Option+A", "Your abbreviations, in a pane beside the note: one  SHORT = Long form  per line, ^S applies them, Option+W closes the pane. At the end are suggestions from the shorthand your notes already use (EQ, CT, esp…): delete the # to use one. Select a phrase first to make an abbreviation for it."),
@@ -2109,8 +2220,7 @@ CSI_KEYS = {
     "[H": curses.KEY_HOME, "OH": curses.KEY_HOME, "[1~": curses.KEY_HOME, "[7~": curses.KEY_HOME,
     "[F": curses.KEY_END, "OF": curses.KEY_END, "[4~": curses.KEY_END, "[8~": curses.KEY_END,
     "[3~": curses.KEY_DC, "[5~": curses.KEY_PPAGE, "[6~": curses.KEY_NPAGE, "[Z": curses.KEY_BTAB,
-    "[21~": curses.KEY_F10,
-    "[20~": curses.KEY_F9,
+    "[19~": curses.KEY_F8, "[20~": curses.KEY_F9, "[21~": curses.KEY_F10,  # if curses didn't translate them
     "[27;2;13~": "shift-enter", "[13;2u": "shift-enter",
     "[1;3D": "word-left", "[1;5D": "word-left", "[1;3C": "word-right", "[1;5C": "word-right",
     "[3;3~": "delete-word-right", "[3;5~": "delete-word-right",
@@ -2352,9 +2462,12 @@ class App:
             pass
 
     def open(self, path):
+        leaving = not (self.buf and os.path.realpath(self.buf.path) == os.path.realpath(path))
         if not self.save_if_dirty():
             self.say("Can't switch notes until this one saves", 8)
             return False
+        if leaving:
+            self.pane.exam = None  # the exam was for the note this pane is leaving
         self.history.snapshot()
         self.remember_position()
         shared = [b for p, b in self.buffers() if p is not self.pane
@@ -2809,6 +2922,10 @@ class App:
         # Status bar
         path = b.path
         name = os.path.relpath(path, NOTES_DIR) if path.startswith(NOTES_DIR + os.sep) else path
+        barw = width - (1 if left_x + width >= W else 0)  # never write the screen's last cell
+        if self.pane.exam:
+            self.draw_exam_bar(top_y + height - 1, left_x, barw, name, active, b)
+            return cursor if active else None
         words = b.word_count()
         left = f" {name}  {'● unsaved' if b.dirty else '✓ saved'}"
         if active and time.time() < self.msg_until:
@@ -2827,6 +2944,67 @@ class App:
         look = ("match" if self.save_failed else "bar") if active else "bar_off"
         self.put(top_y + height - 1, left_x, bar[:barw].ljust(barw), self.A[look])
         return cursor if active else None
+
+    def draw_exam_bar(self, y, x, barw, name, active, b):
+        """Status line during an exam: time left and body words.
+
+        The main loop redraws once a second when no key arrives, and that is what moves
+        the clock and fires the 10- and 5-minute notes. Over the word limit the count uses
+        the theme's warning colour, which is the misspelt-word highlight."""
+        exam = self.pane.exam
+        remaining = exam["end"] - time.time()
+        if active:
+            msg, exam["told10"], exam["told5"] = exam_warning(
+                exam["minutes"], remaining, exam["told10"], exam["told5"])
+            if msg:
+                self.say(msg)
+        text, count, over = exam_status(remaining, b.body_word_count(), exam["limit"])
+        message = self.msg if active and time.time() < self.msg_until else ""
+        shown = exam_bar_text(name, message, text, barw)
+        look = ("match" if self.save_failed else "bar") if active else "bar_off"
+        if barw < 1:
+            return
+        self.put(y, x, shown[:barw].ljust(barw), self.A[look])
+        if over:
+            at = shown.rfind(count)
+            if 0 <= at < barw:
+                self.put(y, x + at, count[:barw - at], self.A["spell"])
+
+    def exam_mode(self):
+        """Option+X or F8: a countdown on this pane for a timed essay or problem question.
+        The note stays editable. Closing the pane, opening another note, or quitting ends it."""
+        if not self.buf:
+            return
+        if self.pane.exam:
+            if self.ask("Stop the exam?  y yes · n no", "yn") == "y":
+                self.pane.exam = None
+                self.say("Exam stopped")
+            return
+
+        def number(label, retry, limit, blank=False):
+            while True:
+                raw = self.prompt(label)
+                if raw is None:
+                    return None
+                text = raw.strip().replace(",", "")
+                if text == "" and blank:
+                    return 0
+                try:
+                    n = int(text)
+                except ValueError:
+                    n = 0
+                if 0 < n <= limit:
+                    return n
+                label = retry
+
+        minutes = number("Minutes (e.g. 90): ", "Minutes as a number, e.g. 90: ", 9999)
+        if not minutes:
+            return
+        limit = number("Word limit (blank for none): ", "A number, or blank for none: ", 1000000, blank=True)
+        if limit is None:
+            return
+        self.pane.exam = {"end": time.time() + minutes * 60, "limit": limit or None,
+                          "minutes": minutes, "told10": False, "told5": False}
 
     # Input helpers
     def read_char(self):
@@ -2893,7 +3071,7 @@ class App:
             first = self.get_key()
             if first in ("\r", "\n"):
                 return ("key", "shift-enter")  # Option+Enter on terminals using Option as Meta
-            if first in ("b", "f", "e", "d", "D", "w", "o", "h", "t", "c", "r", "l", "a", "j", "k", "\x7f", "\x08"):
+            if first in ("b", "f", "e", "d", "D", "w", "o", "h", "t", "c", "r", "l", "a", "j", "k", "x", "\x7f", "\x08"):
                 return ("alt", first)
             if isinstance(first, int):  # Esc + an arrow curses already decoded: Option+arrow
                 return ("key", OPTION_ARROWS.get(first))
@@ -4388,6 +4566,7 @@ class App:
                   ("Replace…", "Option+R", ["replace"]), ("Revision cards…", "Option+C", ["cards"]),
                   ("Open to-dos…", "Option+J", ["todos"]),
                   ("Check OSCOLA…", "Option+K", ["oscola"]),
+                  ("Stop exam" if self.pane.exam else "Exam…", "Option+X", ["exam"]),
                   ("Abbreviations…", "Option+A", ["abbreviations"]),
                   ("Export…", "Option+E", ["export"]), ("Themes…", "Option+T", ["themes"])]
         H, W = self.scr.getmaxyx()
@@ -4502,7 +4681,7 @@ class App:
                 return {"b": "word-left", "f": "word-right", "e": "export", "d": "split-right",
                         "D": "split-down", "w": "close-pane", "o": "next-pane", "h": "highlight", "t": "themes",
                         "c": "cards", "r": "replace", "l": "links", "a": "abbreviations", "j": "todos",
-                        "k": "oscola",
+                        "k": "oscola", "x": "exam",
                         "\x7f": "delete-word-left", "\x08": "delete-word-left"}[r[1]]
             return r[1]  # a curses key, a name, or None for keys we don't use
         if key == curses.KEY_MOUSE:
@@ -4659,6 +4838,8 @@ class App:
             self.revise()
         elif key in ("oscola", curses.KEY_F9):
             self.check_oscola()
+        elif key in ("exam", curses.KEY_F8):
+            self.exam_mode()
         elif key == "links":
             self.links()
         elif key == "\x0c":
@@ -4751,7 +4932,7 @@ class App:
                     self.speller.poll()
                 self.draw()
                 busy = self.speller and self.speller.busy
-                self.scr.timeout(50 if busy or self.flash else 1000)  # redraw promptly when a flash ends
+                self.scr.timeout(50 if busy or self.flash else 1000)  # redraw when a flash ends; once a second the exam clock moves
                 key = self.get_key()
                 self.scr.timeout(1000)
                 if key is None:

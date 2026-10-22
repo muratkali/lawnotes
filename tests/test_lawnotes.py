@@ -1014,6 +1014,104 @@ class OscolaTests(unittest.TestCase):
             with self.subTest(series=series):
                 self.assertEqual([issue[3] for issue in lawnotes.oscola_issues([f"[2001] {series} 12"])],
                                  ["Remove full stops"])
+class ExamTests(unittest.TestCase):
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(dir=TMP), "Essay.md")
+
+    def test_body_words_skip_comments_footnotes_and_markers(self):
+        w = lawnotes.body_words
+        self.assertEqual(w(["# Duty of care"]), 3)
+        self.assertEqual(w(["The **neighbour** principle in *Donoghue v Stevenson*."]), 7)
+        self.assertEqual(w(["- the burden of proof"]), 4)
+        self.assertEqual(w(["> Lord Atkin's test"]), 3)
+        self.assertEqual(w(["See the case.[^1] // from the lecture"]), 3)
+        self.assertEqual(w(["[^1]: This footnote is not counted."]), 0)
+        self.assertEqual(w(["[[Tort/Duty|duty of care]]"]), 3)
+        self.assertEqual(w(["==highlighted words== here"]), 3)
+        self.assertEqual(w(["s 2(1) of the Act"]), 5)
+        self.assertEqual(w(["[1932] AC 562"]), 3)
+        self.assertEqual(w(["| Case | Held |"]), 2)
+        self.assertEqual(w(["| --- | --- |"]), 0)
+        self.assertEqual(w(["```"]), 0)
+        self.assertEqual(w(["https://ucl.ac.uk/notes stays"]), 2)  # the // in a URL stays
+        self.assertEqual(w(["// just a note"]), 0)
+        self.assertEqual(w(["- **Held:** the duty"]), 3)
+        self.assertEqual(w(["- [ ] task"]), 1)
+        self.assertEqual(w(["D_1 remains"]), 2)
+        self.assertEqual(w(["## Title ##"]), 1)
+        self.assertEqual(w(["`ratio decidendi`"]), 2)
+        raw = ["Duty // note", "[^1]: hidden words here"]
+        self.assertEqual(w(raw), 1)
+        self.assertGreater(sum(len(line.split()) for line in raw), 1)
+
+    def test_body_word_count_follows_edits(self):
+        b = lawnotes.Buffer(self.path)
+        b.insert("# Duty")
+        self.assertEqual(b.body_word_count(), 1)
+        self.assertEqual(b.word_count(), 2)  # the heading mark counts in the ordinary total
+        b.newline()
+        b.insert("hello // hidden")
+        self.assertEqual(b.body_word_count(), 2)
+        b.newline()
+        b.insert("[^1]: not in the essay")
+        self.assertEqual(b.body_word_count(), 2)
+        self.assertGreater(b.word_count(), b.body_word_count())
+        b.insert(" more")  # still on the footnote line
+        self.assertEqual(b.body_word_count(), 2)
+        b.cy, b.cx = 0, len(b.lines[0])
+        b.insert(" more")
+        self.assertEqual(b.body_word_count(), 3)
+
+    def test_exam_status_clock_limit_and_warnings(self):
+        text, count, over = lawnotes.exam_status(90 * 60, 1214, 2000)
+        self.assertEqual(text, "1:30:00  1,214/2,000 words")
+        self.assertEqual(count, "1,214/2,000 words")
+        self.assertFalse(over)
+        self.assertEqual(lawnotes.exam_status(45 * 60, 12, None)[0], "45:00  12 words")
+        self.assertEqual(lawnotes.exam_status(59, 1, None)[0], "00:59  1 word")
+        self.assertEqual(lawnotes.exam_clock(3600), "1:00:00")
+        self.assertEqual(lawnotes.exam_clock(3599), "59:59")
+        text, count, over = lawnotes.exam_status(0, 1987, 2000)
+        self.assertEqual(text, "Time's up · 1,987 words · +0:00")
+        self.assertFalse(over)
+        text, count, over = lawnotes.exam_status(-192, 2100, 2000)
+        self.assertEqual(text, "Time's up · 2,100 words · +3:12")
+        self.assertEqual(count, "2,100 words")
+        self.assertTrue(over)
+        self.assertFalse(lawnotes.exam_status(10, 2000, 2000)[2])  # on the limit is not past it
+        self.assertTrue(lawnotes.exam_status(10, 2001, 2000)[2])
+        self.assertEqual(lawnotes.exam_over(3661), "+1:01:01")
+        self.assertEqual(lawnotes.exam_warning(90, 600.9, False, False)[0], "10 minutes left")
+        self.assertIsNone(lawnotes.exam_warning(90, 601, False, False)[0])
+        self.assertIsNone(lawnotes.exam_warning(10, 600, False, False)[0])  # started at 10:00
+        msg, told10, told5 = lawnotes.exam_warning(90, 200, False, False)
+        self.assertEqual((msg, told10, told5), ("5 minutes left", True, True))
+        self.assertEqual(lawnotes.exam_warning(8, 300, False, False)[0], "5 minutes left")
+        self.assertIsNone(lawnotes.exam_warning(4, 240, False, False)[0])
+        self.assertIsNone(lawnotes.exam_warning(90, 0, False, False)[0])
+        # a 40-column pane keeps the clock and the count, and cuts the name before them
+        essential = "1:30:00  1,214/2,000 words"
+        line = lawnotes.exam_bar_text("Contract/Negligence Essay.md", "10 minutes left", essential, 39)
+        self.assertEqual(len(line), 39)
+        self.assertTrue(line.endswith(essential), line)
+        self.assertIn("10 min", line)
+        self.assertNotIn("Negligence", line)
+        plain = lawnotes.exam_bar_text("Exam.md", "", essential, 39)
+        self.assertIn("Exam.md", plain)
+        self.assertTrue(plain.endswith(essential))
+        ended, _, _ = lawnotes.exam_status(-192, 1987, None)
+        self.assertTrue(lawnotes.exam_bar_text("Exam.md", "", ended, 39).endswith(ended))
+
+    def test_help_puts_exam_with_revising(self):
+        rev = next(i for i, (k, d) in enumerate(lawnotes.HELP) if k == "#" and d == "Revising")
+        nxt = next(i for i, (k, d) in enumerate(lawnotes.HELP) if i > rev and k == "#")
+        text = dict(lawnotes.HELP[rev:nxt])["Option+X"]
+        self.assertIn("F8", text)
+        self.assertIn("//", text)
+        self.assertIn("[^1]", text)
+        self.assertIn("Markdown", text)
+        self.assertIn("warning colour", text)
+        self.assertIn("keep writing", text)
 
 
 class Session:
@@ -1694,6 +1792,66 @@ class SessionTests(unittest.TestCase):
                                capture_output=True, text=True).stdout.split()
         self.assertIn("Hist/Note.md", files)
         self.assertNotIn("Hist/lecture.pdf", files)
+
+    def test_exam_mode(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Exam.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        text = "# Duty\n\nThe neighbour principle. // ignore me\n[^1]: not counted at all\nStill body\n"
+        with open(note, "w") as f:
+            f.write(text)
+        lines = text.splitlines()
+        start = lawnotes.body_words(lines)
+        lines[-1] += " here"
+        grown = lawnotes.body_words(lines)
+        lines[-1] += " yes"
+        more = lawnotes.body_words(lines)
+        s = Session(note, size=(40, 40))
+        self.assertIn("Exam", s.keys(b"\x1b[<2;4;1M\x1b[<2;4;1m", 0.6))  # right-click
+        s.keys(b"\x1b", 0.4)
+        self.assertIn("Minutes", s.keys(b"\x1bx", 0.5))                    # Option+X
+        self.assertNotIn("Word limit", s.keys(b"\x1b", 0.4))               # Esc cancels
+        s.keys(b"\x1bx", 0.4)
+        self.assertIn("number", s.keys(b"nope\r", 0.4))
+        s.keys(b"\x1b", 0.4)
+        s.keys(b"\x1bx", 0.4)
+        s.keys(b"90\r", 0.4)
+        self.assertNotIn("1:30:00", s.keys(b"\x1b", 0.4))                  # Esc at the word limit
+        self.assertIn("Minutes", s.keys(b"\x1b[19~", 0.5))                 # F8
+        s.keys(b"90\r", 0.4)
+        screen = s.keys(b"2,000\r", 0.6)
+        self.assertRegex(screen, r"1:(30:00|29:5\d)")                  # the clock may already have ticked
+        self.assertIn(f"{start}/2,000 words", screen)                      # readable at 40 columns
+        self.assertRegex(s.keys(b"\x1b[1;3B here", 0.5), rf"\b{grown}\b")  # only the count is redrawn
+        self.assertIn("Stop the exam", s.keys(b"\x1bx", 0.5))
+        self.assertNotIn("Exam stopped", s.keys(b"n", 0.4))                 # n keeps it going
+        self.assertIn("Stop the exam", s.keys(b"\x1bx", 0.5))
+        screen = s.keys(b"y", 0.5)
+        self.assertIn("Exam stopped", screen)
+        self.assertNotIn("/2,000", screen)
+        s.keys(b"\x1bx", 0.4)
+        s.keys(b"90\r", 0.4)
+        screen = s.keys(b"\r", 0.5)                                        # blank word limit
+        self.assertRegex(screen, rf"1:\d\d:\d\d  {grown} words")
+        self.assertNotIn(f"{grown}/", screen)
+        self.assertIn("Stop the exam", s.keys(b"\x1bx", 0.4))
+        s.keys(b"y", 0.4)
+        self.assertNotIn(b"48;5;160", s.out)                               # warning colour, not yet
+        s.keys(b"\x1bx", 0.4)
+        s.keys(b"90\r", 0.4)
+        self.assertIn(f"{grown}/2 words", s.keys(b"2\r", 0.5))             # already past the limit
+        self.assertIn(b"48;5;160", s.out)
+        self.assertRegex(s.keys(b"\x1b[1;3B yes", 0.5), rf"\b{more}\b")   # still editable
+        self.assertIn("Notes in", s.keys(b"\x1bD", 0.8))                   # the new pane has no exam
+        s.keys(b"\x1b", 0.6)                                               # keep this note
+        s.keys(b"\x1bo", 0.5)                                              # back on the exam pane
+        s.keys(b"\x1bw", 0.6)                                              # closing it ends the exam:
+        self.assertIn("Minutes", s.keys(b"\x1bx", 0.5))                    # a new one, not "Stop the exam"
+        s.keys(b"\x1b", 0.4)
+        self.assertTrue(s.quit())
+        saved = open(note).read()
+        self.assertIn("Still body here yes", saved)
+        self.assertIn("// ignore me", saved)
+        self.assertIn("[^1]: not counted at all", saved)
 
 
 FAKE_HERDR = r"""#!/bin/bash

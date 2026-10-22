@@ -8,6 +8,7 @@
 - Open to-dos from every note (Option+J or F10); Enter jumps to one, and x ticks it with undo.
 - Check this note for likely OSCOLA slips (Option+K or F9); Enter jumps to one, and f fixes a mechanical slip.
 - Revision cards (Option+C): your case briefs and case bullets become cards to revise, due cards first; progress syncs between Macs.
+- Exam mode (Option+X, or F8): a countdown and a word count for a timed essay or problem question. Comments, footnote lines and Markdown markers are not counted, and you can keep writing after time is up.
 - Abbreviations that expand as you type (CL → Common Law); Option+A opens your list beside the note, with suggestions from the shorthand your notes already use.
 - Find and replace in one note or in all of them (Option+R), e.g. a misspelt case name or a wrong citation; ^R can undo it for any note.
 - Links between notes: type `[[` and pick a note. Option+L follows a link, or lists the notes linking to this one.
@@ -20,7 +21,7 @@
 - Paste tables from Word: they become Markdown tables, and export back to Word as real tables.
 - Panes like herdr: Option+D splits side by side, Option+Shift+D stacks, Option+O switches, Option+W closes.
 - Themes (Option+T): NERV, Unit-01, Paper, or your own colours.
-- Right-click for a menu: spelling fixes, copy and paste, formatting, split panes.
+- Right-click for a menu: spelling fixes, copy and paste, formatting, split panes, exam mode.
 
 Press **^G** in the editor to see every shortcut.
 
