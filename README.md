@@ -13,6 +13,7 @@
 - Saves as you type, never overwrites a note changed on another Mac, and keeps version history (^R).
 
 - Export to Word or PDF (Option+E): case names in italics (OSCOLA), footnotes as real footnotes.
+- Revision pack (Option+E): every note in the current folder as one Word or PDF document, with a title page and contents.
 - Highlight text (select it, press `=`): exported to Word as a yellow highlight.
 - Paste tables from Word: they become Markdown tables, and export back to Word as real tables.
 - Panes like herdr: Option+D splits side by side, Option+Shift+D stacks, Option+O switches, Option+W closes.
@@ -51,6 +52,8 @@ lawnotes --export Tort/Essay docx --tables
 ```
 
 For essays and coursework, choose "with tables of cases and legislation" (or add `--tables`): an OSCOLA Table of Cases and Table of Legislation go after the title (the first `# ` heading), built from the case names, citations, Acts and EU treaty articles in the note, with a page break before the note itself in Word.
+
+Revision pack, the last choice in that menu, writes every note in the current note's folder to `Folder revision pack.docx` (or `.pdf`) in Downloads, in the same order as the note list (newest first). The document has a title page with the folder and today's date, a contents list, then each note under its own heading. Footnotes stay with the right note. With tables, one Table of Cases and one Table of Legislation cover the whole pack, after the contents.
 
 Word export needs pandoc: `brew install pandoc`. PDF export uses macOS itself.
 

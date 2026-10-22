@@ -1272,6 +1272,156 @@ def export_note(path, lines, fmt, tables=False):
     raise ExportError(f"unknown format {fmt}")
 
 
+# Months written out, so the title page doesn't follow the Mac's language setting.
+_MONTHS = ("January", "February", "March", "April", "May", "June", "July",
+           "August", "September", "October", "November", "December")
+# Pandoc footnote ids: [^1], [^note]. Two notes can both use [^1], so a pack gives each note its own.
+FOOTNOTE_ID_RE = re.compile(r"\[\^([^\s\]]+)\]")
+
+
+def british_date(when):
+    """22 October 2026: the day, the month written out, then the year."""
+    return f"{when.day} {_MONTHS[when.month - 1]} {when.year}"
+
+
+def yaml_quote(text):
+    """A YAML double-quoted string, so a folder named like Contract: Offer stays a title."""
+    return '"' + str(text).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ") + '"'
+
+
+def rename_footnotes(lines, number):
+    """[^1] in two notes would become one footnote once they're joined, so this note's
+    ids gain a prefix: the third note's [^1] becomes [^n3-1]."""
+    prefix = "n%d-" % number
+
+    def repl(m):
+        return "[^" + prefix + m.group(1) + "]"
+
+    return [FOOTNOTE_ID_RE.sub(repl, line) for line in lines]
+
+
+def demote_headings(lines):
+    """One level down, so a note's headings sit under the pack's section for that note.
+    Markdown stops at six hashes, so a heading that deep stays there."""
+    out = []
+    for line in lines:
+        m = HEADING_RE.match(line)
+        if m and len(m.group(1)) < 6:
+            line = "#" + line
+        out.append(line)
+    return out
+
+
+def pack_note_name(rel, folder):
+    """How a note is headed in the pack: its path inside the folder, without .md.
+    Tort/Duty/Caparo.md in the Tort pack is Duty/Caparo."""
+    rel = rel.replace(os.sep, "/")
+    rest = rel[len(folder) + 1:] if folder else rel
+    base, ext = os.path.splitext(rest)
+    return base if ext in NOTE_EXTS else rest
+
+
+def notes_in_folder(listed, folder):
+    """[(name, path), ...] from a note list in ^O order (newest first), for notes inside folder.
+    listed is what list_notes() returns: [(mtime, relative path, path), ...]. A note in
+    Tort/Duty is part of the Tort pack; Tortoise/Note.md is not."""
+    folder = folder.replace(os.sep, "/").strip("/")
+    prefix = folder + "/"
+    out = []
+    for _mtime, rel, path in listed:
+        rel = rel.replace(os.sep, "/")
+        if rel.startswith(prefix) and not os.path.basename(rel).startswith("."):
+            out.append((pack_note_name(rel, folder), path))
+    return out
+
+
+def note_folder(path):
+    """The folder of a note in the notes folder, relative to it ('Tort' or 'Tort/Duty').
+    None for a note at the top, or one that lives outside the notes folder."""
+    if not inside_notes(path):
+        return None
+    rel = os.path.relpath(path, NOTES_DIR).replace(os.sep, "/")
+    if rel.startswith("../"):
+        return None
+    return rel.rpartition("/")[0] or None
+
+
+def pack_export_name(folder):
+    """'Tort revision pack'. A slash isn't allowed in a file name, so Tort/Duty becomes Tort-Duty."""
+    name = folder.replace("/", "-").replace(os.sep, "-")
+    name = re.sub(r"[\x00-\x1f]", "", name).strip()
+    return (name or "Notes") + " revision pack"
+
+
+def revision_pack_markdown(notes, folder, when=None, tables=False):
+    """One Markdown document for a folder of notes, in the order given (the note list's order).
+    notes: [(name, lines), ...]. Each note is a top-level section; its headings drop one level,
+    its // comments are left out, and its [^1] becomes [^n1-1] so it doesn't collide with the
+    next note. With tables, one Table of Cases and one Table of Legislation cover the whole pack.
+    The title and date are metadata: pandoc prints them, then the contents, then this body."""
+    when = when or datetime.date.today()
+    parts = ["---",
+             "title: " + yaml_quote(folder),
+             "date: " + yaml_quote(british_date(when)),
+             'toc-title: "Contents"',
+             "---",
+             ""]
+    if tables:
+        found = authorities([line for _name, lines in notes for line in lines])
+        if any(found.values()):
+            parts += [tables_markdown(found).rstrip("\n"), ""]
+    # Word breaks the page here; PDF (HTML) uses the div. Each format drops the other's block.
+    parts += [PAGE_BREAK.strip("\n"), "",
+              '```{=html}',
+              '<div style="page-break-before: always;"></div>',
+              "```",
+              ""]
+    for number, (name, lines) in enumerate(notes, 1):
+        body = demote_headings(export_markdown(rename_footnotes(lines, number)).split("\n"))
+        while body and body[0] == "":
+            body.pop(0)
+        while body and body[-1] == "":
+            body.pop()
+        parts += ["# " + name.replace("\n", " "), "", *body, ""]
+    return "\n".join(parts).rstrip("\n") + "\n"
+
+
+def export_revision_pack(folder, notes, fmt, tables=False, when=None):
+    """Write every note in a folder as one .docx or .pdf in EXPORT_DIR. Returns the new file's path.
+    Same pandoc treatment as one note, plus a contents list."""
+    pandoc = find_tool("pandoc")
+    if not pandoc:
+        raise ExportError("export needs pandoc: run  brew install pandoc  (free)")
+    name = pack_export_name(folder)
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+    out = os.path.join(EXPORT_DIR, name + "." + fmt)
+    text = revision_pack_markdown(notes, folder, when, tables)
+    source = "markdown+hard_line_breaks+mark-simple_tables-multiline_tables"  # same as one note
+    if fmt == "docx":
+        r = subprocess.run([pandoc, "-f", source, "-t", "docx", "--reference-doc", reference_docx(pandoc),
+                            "--toc", "-o", out], input=text, capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            raise ExportError(r.stderr.strip()[-200:] or "pandoc failed")
+        return out
+    if fmt == "pdf":
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            html, css = os.path.join(d, "note.html"), os.path.join(d, "note.css")
+            with open(css, "w") as f:
+                f.write(EXPORT_CSS)
+            r = subprocess.run([pandoc, "-f", source, "-t", "html5", "-s", "--toc",
+                                "--metadata", "pagetitle=" + name, "-c", css, "--embed-resources", "-o", html],
+                               input=text, capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                raise ExportError(r.stderr.strip()[-200:] or "pandoc failed")
+            r = subprocess.run([compiled_helper("html2pdf"), html, os.path.abspath(out)],
+                               capture_output=True, text=True, timeout=120)
+            if r.returncode != 0 or not os.path.exists(out):
+                raise ExportError("couldn't make the PDF")
+        return out
+    raise ExportError(f"unknown format {fmt}")
+
+
 def load_abbreviations(path=None):
     """The built-in abbreviations plus yours ("SHORT = Long form" lines; yours win)."""
     out = dict(DEFAULT_ABBREVIATIONS)
@@ -1884,7 +2034,7 @@ HELP = [
     ("^K", "Cut the line (press repeatedly to cut several lines)."),
     ("^U", "Paste the cut lines above the cursor."),
     ("^Z  ^Y", "Undo / redo. Undo also brings back a selection you clicked or moved away from."),
-    ("Option+E", "Export the note to Word (.docx) or PDF, into Downloads. Case names are put in italics (OSCOLA), [^1] footnotes become real footnotes. F5 does the same. For an essay, pick “with tables of cases and legislation”: OSCOLA tables after the title, then a new page."),
+    ("Option+E", "Export the note to Word (.docx) or PDF, into Downloads. Case names are put in italics (OSCOLA), [^1] footnotes become real footnotes. F5 does the same. For an essay, pick “with tables of cases and legislation”: OSCOLA tables after the title, then a new page. Revision pack: every note in this note's folder, as one document named “Folder revision pack”, with a title page (the folder and the date), a contents list, then each note. With tables, one table of cases and one of legislation cover the whole pack."),
     ("^R", "Version history: snapshots of your notes are taken automatically every few minutes while you work. Pick one to restore it (^Z undoes the restore)."),
     ("#", "Formatting (Markdown)"),
     ("# Title", "Heading;  ## Section  for a subheading."),
@@ -3805,26 +3955,66 @@ class App:
         b.cy, b.cx = y1, x1
         self.anchor = None
 
+    def folder_notes(self, folder):
+        """[(name, lines), ...] for every note in folder, in the note list's order (^O, newest first).
+        A note open in a pane is taken as it is on screen, including edits not saved yet."""
+        open_lines = {os.path.realpath(b.path): b.lines for _, b in self.buffers()}
+        notes = []
+        for name, path in notes_in_folder(self.list_notes(), folder):
+            lines = open_lines.get(os.path.realpath(path))
+            if lines is None:
+                try:
+                    lines = Buffer(path).lines
+                except OSError:
+                    continue
+            notes.append((name, lines))
+        return notes
+
     def export(self):
+        formats = (
+            ("Word document (.docx) — footnotes stay footnotes", ("docx", False)),
+            ("PDF (A4, Times 12, footnotes as endnotes)", ("pdf", False)),
+            ("Word (.docx) with tables of cases and legislation — for essays", ("docx", True)),
+            ("PDF with tables of cases and legislation — for essays", ("pdf", True)),
+        )
+        folder = note_folder(self.buf.path)
+        items = list(formats)
+        label = f"Revision pack: every note in {folder}" if folder else ""
+        if folder:
+            items.append((label, ("pack",)))
+        # At 40 columns a long folder is cut off the row, so the guide (which wraps) repeats it.
+        guide = label if len(label) > 38 else ""
         choice = self.pick("Export this note — saved to " + EXPORT_DIR.replace(os.path.expanduser("~"), "~", 1),
-                           lambda q: [(label, fmt) for label, fmt in (
-                               ("Word document (.docx) — footnotes stay footnotes", ("docx", False)),
-                               ("PDF (A4, Times 12, footnotes as endnotes)", ("pdf", False)),
-                               ("Word (.docx) with tables of cases and legislation — for essays", ("docx", True)),
-                               ("PDF with tables of cases and legislation — for essays", ("pdf", True)))
-                               if q.lower() in label.lower()])
+                           lambda q: [it for it in items if q.lower() in it[0].lower()], guide=guide)
         if not choice:
             return
+        notes = None
+        if choice[0] == "pack":
+            choice = self.pick(label, lambda q: [it for it in formats if q.lower() in it[0].lower()],
+                               guide="Word or PDF. “With tables” is one table of cases and one of legislation, for every note.")
+            if not choice:
+                return
+            notes = self.folder_notes(folder)  # before saving, so the order stays the note list's order
+            if not notes:
+                self.say(f"No notes in {folder}", 8)
+                return
         fmt, tables = choice
         self.safe_save()
         self.say("Exporting…", 30)
         self.draw()
         try:
-            out = export_note(self.buf.path, self.buf.lines, fmt, tables)
-            none = tables and not any(authorities(self.buf.lines).values())
+            if notes is None:
+                out = export_note(self.buf.path, self.buf.lines, fmt, tables)
+                none = tables and not any(authorities(self.buf.lines).values())
+                what = os.path.basename(self.buf.path)
+            else:
+                out = export_revision_pack(folder, notes, fmt, tables)
+                found = authorities([line for _, lines in notes for line in lines])
+                none = tables and not any(found.values())
+                what = folder + " revision pack"
             self.say("Exported to " + out.replace(os.path.expanduser("~"), "~", 1)
                      + (" (no cases or legislation found for the tables)" if none else ""), 10)
-            log(f"exported {os.path.basename(self.buf.path)} as {fmt}{' with tables' * tables}")
+            log(f"exported {what} as {fmt}{' with tables' * tables}")
         except (ExportError, OSError, subprocess.SubprocessError) as e:
             self.say(f"Export failed: {e}", 12)
 
