@@ -325,12 +325,33 @@ class TextTests(unittest.TestCase):
         self.assertEqual(md.split("\n")[:3], ["See the duty, Offer and Breach.", "# Negligence",
                                               "*Donoghue v Stevenson* applies"])  # shown text italicised as a case
 
-    def test_link_highlight_and_hint(self):
+    @staticmethod
+    def highlighter():
         roles = ["text", "h1", "h", "case", "cite", "statute", "bullet", "quote", "mark", "comment", "link",
-                 "dim", "party_D", "party_V", "party_C"]
+                 "dim", "party_D", "party_V", "party_C", "bold", "italic"]
         app = object.__new__(lawnotes.App)
         app.A = {r: (n + 1) << 8 for n, r in enumerate(roles)}
-        app._hl, app.italic = {}, 0
+        app._hl, app.italic, app._links = {}, 0, (0, None)
+        return app
+
+    def test_bold_and_italic_colours(self):
+        app = self.highlighter()
+        A = app.A
+        line = "a **duty** of *care*: *Donoghue v Stevenson* [1932] AC 562"
+        attrs = app.highlight(line)
+        self.assertEqual(set(attrs[2:10]), {A["bold"]})               # **duty**, stars included
+        self.assertEqual(set(attrs[14:20]), {A["italic"]})            # *care*
+        self.assertEqual(attrs[0], A["text"])
+        case = line.index("Donoghue")
+        self.assertEqual(attrs[case], A["case"])                       # a case name keeps its own colour
+        self.assertEqual(attrs[line.index("*Donoghue")], A["italic"])  # its stars take the italic colour
+        quote = app.highlight("> **held**")
+        self.assertEqual(quote[3], A["bold"])                          # in quotes too
+        palette, problems = lawnotes.parse_theme("background = #ffffd7\ntext = #262626\n")
+        self.assertEqual((problems, palette["bold"][0], palette["italic"][0]), ([], 235, 235))  # older light theme files: plain
+
+    def test_link_highlight_and_hint(self):
+        app = self.highlighter()
         app._links = (time.time() + 60, lawnotes.link_index(["Tort/Negligence.md"]))
         line = "a [[Negligence]] b [[Nowhere]]"
         attrs = app.highlight(line)

@@ -185,6 +185,7 @@ THEMES = {
         "bar": (230, 88), "key": (16, 208), "dim": (174, 52), "sel": (16, 208), "spell": (231, 160),
         "party_D": (16, 214), "party_V": (16, 218), "party_C": (16, 117), "copied": (16, 120),
         "bar_off": (181, 88), "comment": (16, 229), "mark": (16, 226), "link": (81, 52),
+        "bold": (231, 52), "italic": (159, 52),
     },
     "Unit-01": {  # Evangelion Unit-01: deep purple with acid green
         "text": (194, 54), "h1": (118, 54), "h": (154, 54), "case": (191, 54), "cite": (183, 54),
@@ -192,6 +193,7 @@ THEMES = {
         "bar": (16, 112), "key": (16, 118), "dim": (140, 54), "sel": (16, 118), "spell": (231, 160),
         "party_D": (16, 214), "party_V": (16, 218), "party_C": (16, 117), "copied": (16, 120),
         "bar_off": (189, 91), "comment": (16, 229), "mark": (16, 226), "link": (81, 54),
+        "bold": (231, 54), "italic": (217, 54),
     },
     "Paper": {  # light: dark ink on cream, for daylight
         "text": (235, 230), "h1": (124, 230), "h": (130, 230), "case": (94, 230), "cite": (125, 230),
@@ -199,12 +201,13 @@ THEMES = {
         "bar": (230, 124), "key": (231, 124), "dim": (244, 230), "sel": (231, 25), "spell": (231, 160),
         "party_D": (16, 214), "party_V": (16, 218), "party_C": (16, 117), "copied": (16, 120),
         "bar_off": (238, 252), "comment": (16, 229), "mark": (16, 226), "link": (25, 230),
+        "bold": (18, 230), "italic": (30, 230),
     },
 }
 # The names theme files use, in the order New theme writes them
 THEME_ROLES = [
     ("text", "text"), ("title", "h1"), ("headings", "h"), ("case-names", "case"), ("citations", "cite"),
-    ("statutes", "statute"), ("bullets", "bullet"), ("quotes", "quote"), ("links", "link"), ("hints", "dim"),
+    ("statutes", "statute"), ("bullets", "bullet"), ("quotes", "quote"), ("links", "link"), ("bold", "bold"), ("italic", "italic"), ("hints", "dim"),
     ("comments", "comment"), ("highlights", "mark"), ("misspelt", "spell"), ("selection", "sel"),
     ("search", "match"), ("copied", "copied"), ("keys", "key"), ("status-bar", "bar"),
     ("status-bar-other-panes", "bar_off"), ("party-d", "party_D"), ("party-v", "party_V"),
@@ -212,7 +215,7 @@ THEME_ROLES = [
 ]
 # Roles added after theme files were already in use, and which of the file's own colours to use
 # instead when its background isn't NERV's (NERV's colour could be unreadable on it)
-LATER_ROLES = {"link": "h"}
+LATER_ROLES = {"link": "h", "bold": "text", "italic": "text"}
 _CUBE = (0, 95, 135, 175, 215, 255)
 _ANSI = [(0, 0, 0), (205, 0, 0), (0, 205, 0), (205, 205, 0), (0, 0, 238), (205, 0, 205), (0, 205, 205),
          (229, 229, 229), (127, 127, 127), (255, 0, 0), (0, 255, 0), (255, 255, 0), (92, 92, 255),
@@ -1784,7 +1787,7 @@ HELP = [
     ("**bold**", "Bold;  *italic*  italic."),
     ("#", "Colours"),
     ("Option+T", "Themes: pick NERV (dark red), Unit-01 (purple and green), Paper (light), or one of yours. New theme copies the current one into a file you can change: save it and Law Notes updates straight away. F6 does the same."),
-    ("", "Case names gold, citations like [1932] AC 562 pink, statutes like s 2(1) or Human Rights Act 1998 green, links to other notes underlined, misspelt words highlighted in red."),
+    ("", "Case names gold, citations like [1932] AC 562 pink, statutes like s 2(1) or Human Rights Act 1998 green, links to other notes underlined, **bold** white and *italic* pale blue (each theme has its own), misspelt words highlighted in red."),
     ("D  V  C", "Party labels in problem answers: D (defendant) orange, V (victim) pink, C (claimant) blue; also D1, D2, D's."),
     ("", "If Law Notes ever closes or crashes unexpectedly, the reason is logged in iCloud Drive → Law Notes Logs."),
     ("", "Notes are plain Markdown files in ~/UCL/notes, which points to iCloud Drive → UCL Notes, so they're backed up off this Mac and open on iPhone or iPad (Files app). Any other app can open them too."),
@@ -1888,6 +1891,7 @@ class App:
             "party_C": (C.COLOR_BLACK, C.COLOR_CYAN), "copied": (C.COLOR_BLACK, C.COLOR_GREEN),
             "bar_off": (C.COLOR_WHITE, C.COLOR_BLACK), "comment": (C.COLOR_BLACK, C.COLOR_YELLOW),
             "mark": (C.COLOR_BLACK, C.COLOR_YELLOW), "link": (C.COLOR_CYAN, C.COLOR_RED),
+            "bold": (C.COLOR_WHITE, C.COLOR_RED), "italic": (C.COLOR_CYAN, C.COLOR_RED),
         }
         palette = {role: (theme[role], c8) for role, c8 in basic.items()}
         pairs = {}
@@ -1924,6 +1928,8 @@ class App:
             "comment": pairs["comment"],
             "mark": pairs["mark"] | curses.A_BOLD,
             "link": pairs["link"] | curses.A_UNDERLINE,
+            "bold": pairs["bold"] | curses.A_BOLD,
+            "italic": pairs["italic"] | italic,
         }
         self.italic = italic
         return problems
@@ -2246,10 +2252,11 @@ class App:
             for rx, key in ((STATUTE_RE, "statute"), (CITE_RE, "cite"), (CASE_RE, "case")):
                 for mm in rx.finditer(line):
                     attrs[mm.start():mm.end()] = [A[key]] * (mm.end() - mm.start())
-            for rx, extra in ((BOLD_RE, curses.A_BOLD), (ITALIC_RE, self.italic)):
-                for mm in rx.finditer(line):
-                    for k in range(mm.start(), mm.end()):
-                        attrs[k] |= extra
+            plain = (A["text"], A["quote"])
+            for rx, extra, look in ((BOLD_RE, curses.A_BOLD, A["bold"]), (ITALIC_RE, self.italic, A["italic"])):
+                for mm in rx.finditer(line):  # **bold** and *italic* in their own colours; case names
+                    for k in range(mm.start(), mm.end()):  # and citations inside keep theirs
+                        attrs[k] = look if attrs[k] in plain else attrs[k] | extra
             bm = BULLET_RE.match(line)
             if bm and not quote:
                 attrs[bm.start(2):bm.end(2)] = [A["bullet"]] * len(bm.group(2))
@@ -2268,6 +2275,15 @@ class App:
         return attrs
 
     # Drawing
+    def refresh(self):
+        """Send the screen as one synchronised update, so the terminal never shows a half-drawn
+        frame (lists and menus scrolled with the wheel flickered without it). Ignored where unsupported."""
+        sys.stdout.write("\x1b[?2026h")
+        sys.stdout.flush()
+        self.scr.refresh()
+        sys.stdout.write("\x1b[?2026l")
+        sys.stdout.flush()
+
     def put(self, y, x, text, attr=0):
         try:
             self.scr.addstr(y, x, text, attr)
@@ -2376,7 +2392,7 @@ class App:
         H, W = scr.getmaxyx()
         if H < 5 or W < 30:
             self.put(0, 0, "Window too small"[:W - 1])
-            scr.refresh()
+            self.refresh()
             return
         self.borders = self.layout.place(0, 0, H - 1, W)
         for kind, node, y, x, h in self.borders:  # the line between side-by-side panes
@@ -2406,11 +2422,7 @@ class App:
             scr.move(*cursor)
         if not refresh:  # the caller draws more on top first
             return
-        sys.stdout.write("\x1b[?2026h")  # begin synchronised update (ignored where unsupported)
-        sys.stdout.flush()
-        scr.refresh()
-        sys.stdout.write("\x1b[?2026l")
-        sys.stdout.flush()
+        self.refresh()
 
     def draw_pane(self, top_y, left_x, height, width, active):
         """Draw the current view into a rectangle: text rows, then this pane's status line.
@@ -2616,7 +2628,7 @@ class App:
             self.scr.clrtoeol()
             self.put(H - 1, 1, shown, self.A["h"])
             self.scr.move(H - 1, min(1 + len(shown), W - 1))
-            self.scr.refresh()
+            self.refresh()
             k = self.get_key()
             if k is None:
                 continue
@@ -2672,7 +2684,7 @@ class App:
             except curses.error:
                 pass
             self.scr.move(Y + 1, X + min(9 + len(query), W - 1))
-            self.scr.refresh()
+            self.refresh()
 
             k = self.get_key()
             if k is None or k == curses.KEY_RESIZE:
@@ -2926,7 +2938,7 @@ class App:
                 self.put(r + 1, x, text, attr)
             more = "↑↓ scroll · " if len(rows) > view else ""
             self.put(H - 1, 1, (more + "any other key closes help")[:W - 2], self.A["dim"])
-            self.scr.refresh()
+            self.refresh()
             k = self.get_key()
             if k is None or k == curses.KEY_RESIZE:
                 continue
@@ -3121,7 +3133,7 @@ class App:
             pass
         if H < 6 or W < 20:
             self.put(0, 0, "Window too small"[:W - 1])
-            self.scr.refresh()
+            self.refresh()
             return top
         width = max(10, min(MAX_TEXT_WIDTH, W - 3))
 
@@ -3167,7 +3179,7 @@ class App:
             self.put(H - 1, x, key, self.A["key"])
             self.put(H - 1, x + len(key) + 1, label, self.A["dim"])
             x += len(key) + len(label) + 3
-        self.scr.refresh()
+        self.refresh()
         return top
 
     def history_menu(self):
@@ -3399,7 +3411,7 @@ class App:
             self.scr.move(H - 1, 0)
             self.scr.clrtoeol()
             self.put(H - 1, 1, question[:W - 2], self.A["h"])
-            self.scr.refresh()
+            self.refresh()
             k = self.get_key()
             if k is None or k == curses.KEY_RESIZE:
                 continue
@@ -3865,7 +3877,7 @@ class App:
                 curses.curs_set(0)
             except curses.error:
                 pass
-            self.scr.refresh()
+            self.refresh()
             key = self.get_key()
             if key is None or key == curses.KEY_RESIZE:
                 continue
