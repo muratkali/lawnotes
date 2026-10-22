@@ -1696,7 +1696,7 @@ class RevisionPackTests(unittest.TestCase):
         empty = lawnotes.revision_pack_markdown([("A", ["No authority here."])], "Tort", self.WHEN, tables=True)
         self.assertNotIn("Table of Cases", empty)
 
-    def test_folder_notes_follow_the_open_list(self):
+    def test_folder_notes_in_name_order(self):
         listed = [
             (30, "Tort/New.md", "/n/Tort/New.md"),
             (20, "Tortoise/No.md", "/n/Tortoise/No.md"),
@@ -1711,7 +1711,7 @@ class RevisionPackTests(unittest.TestCase):
         self.assertEqual(lawnotes.pack_export_name("Tort/Duty"), "Tort-Duty revision pack")
         folder = os.path.join(lawnotes.NOTES_DIR, "PackOrder")
         os.makedirs(os.path.join(folder, "Sub"), exist_ok=True)
-        for name, when in (("Old.md", 1_000_000_000), ("Sub/Mid.md", 1_100_000_000), ("New.md", 1_200_000_000)):
+        for name, when in (("Week 10.md", 1_000_000_000), ("Sub/Mid.md", 1_100_000_000), ("Week 2.md", 1_200_000_000)):
             path = os.path.join(folder, name)
             open(path, "w").write("x\n")
             os.utime(path, (when, when))
@@ -1719,7 +1719,7 @@ class RevisionPackTests(unittest.TestCase):
         os.makedirs(os.path.dirname(side), exist_ok=True)
         open(side, "w").write("no\n")
         names = [name for name, _ in lawnotes.notes_in_folder(lawnotes.App.list_notes(object()), "PackOrder")]
-        self.assertEqual(names, ["New", "Sub/Mid", "Old"])
+        self.assertEqual(names, ["Sub/Mid", "Week 2", "Week 10"])  # by name, not by date
 
     def test_note_folder_and_help(self):
         root = os.path.join(lawnotes.NOTES_DIR, "LoosePack.md")

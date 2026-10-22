@@ -1322,9 +1322,9 @@ def pack_note_name(rel, folder):
 
 
 def notes_in_folder(listed, folder):
-    """[(name, path), ...] from a note list in ^O order (newest first), for notes inside folder.
-    listed is what list_notes() returns: [(mtime, relative path, path), ...]. A note in
-    Tort/Duty is part of the Tort pack; Tortoise/Note.md is not."""
+    """[(name, path), ...] for the notes inside folder, by name, numbers in number order (Week 2
+    before Week 10). listed is what list_notes() returns: [(mtime, relative path, path), ...].
+    A note in Tort/Duty is part of the Tort pack; Tortoise/Note.md is not."""
     folder = folder.replace(os.sep, "/").strip("/")
     prefix = folder + "/"
     out = []
@@ -1332,7 +1332,7 @@ def notes_in_folder(listed, folder):
         rel = rel.replace(os.sep, "/")
         if rel.startswith(prefix) and not os.path.basename(rel).startswith("."):
             out.append((pack_note_name(rel, folder), path))
-    return out
+    return sorted(out, key=lambda it: [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", it[0])])
 
 
 def note_folder(path):
@@ -1354,7 +1354,7 @@ def pack_export_name(folder):
 
 
 def revision_pack_markdown(notes, folder, when=None, tables=False):
-    """One Markdown document for a folder of notes, in the order given (the note list's order).
+    """One Markdown document for a folder of notes, in the order given.
     notes: [(name, lines), ...]. Each note is a top-level section; its headings drop one level,
     its // comments are left out, and its [^1] becomes [^n1-1] so it doesn't collide with the
     next note. With tables, one Table of Cases and one Table of Legislation cover the whole pack.
@@ -3956,7 +3956,7 @@ class App:
         self.anchor = None
 
     def folder_notes(self, folder):
-        """[(name, lines), ...] for every note in folder, in the note list's order (^O, newest first).
+        """[(name, lines), ...] for every note in folder, by name.
         A note open in a pane is taken as it is on screen, including edits not saved yet."""
         open_lines = {os.path.realpath(b.path): b.lines for _, b in self.buffers()}
         notes = []
@@ -3994,7 +3994,7 @@ class App:
                                guide="Word or PDF. “With tables” is one table of cases and one of legislation, for every note.")
             if not choice:
                 return
-            notes = self.folder_notes(folder)  # before saving, so the order stays the note list's order
+            notes = self.folder_notes(folder)
             if not notes:
                 self.say(f"No notes in {folder}", 8)
                 return
