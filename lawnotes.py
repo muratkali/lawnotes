@@ -404,6 +404,57 @@ HEADING_RE = re.compile(r"^(#{1,6})\s")
 # A comment to yourself: // and everything after it (not the // in https://). Highlighted, and
 # left out of exports.
 COMMENT_RE = re.compile(r"(?:^|(?<=\s))//.*$")
+
+
+def oscola_issues(lines):
+    """Likely OSCOLA slips in one note: (line, start, end, problem, replacement)."""
+    issues = []
+    case_slip = re.compile(rf"\b{_STOP}{_NAME}\s+(v\.|vs\.?)\s+{_NAME}\b")
+    year_series = re.compile(r"\(\d{4}\)(?=\s+(?:\d{1,4}\s+)?(?:AC|QB|KB|Ch|Fam|WLR|All ER|UKSC|UKHL|UKPC|EWCA(?:\s+(?:Civ|Crim))?|EWHC)\s+\d+\b)")
+    dotted_series = re.compile(r"\b(?:A\.C\.|Q\.B\.|W\.L\.R\.)(?!\w)")
+    provision_stop = re.compile(r"\b(?:ss?|para)\.(?=\s*\d)")
+    footnote = re.compile(r"^\s*\[\^[^\]]+\]:\s*\S")
+
+    for i, line in enumerate(lines):
+        clean = list(line)
+        pos = 0
+        while pos < len(line):
+            if line[pos] != "`":
+                pos += 1
+                continue
+            end = pos + 1
+            while end < len(line) and line[end] == "`":
+                end += 1
+            close = line.find(line[pos:end], end)
+            stop = len(line) if close < 0 else close + end - pos
+            clean[pos:stop] = " " * (stop - pos)
+            pos = stop
+        clean = "".join(clean)
+        comment = COMMENT_RE.search(clean)
+        if comment:
+            clean = clean[:comment.start()] + " " * (len(clean) - comment.start())
+
+        for m in case_slip.finditer(clean):
+            start, end = m.span(1)
+            issues.append((i, start, end, "Use v, not " + m.group(1), "v"))
+        for cite in CITE_RE.finditer(clean):
+            m = year_series.match(clean, cite.start())
+            if m:
+                issues.append((i, m.start(), m.end(), "Use square brackets", "[" + m.group()[1:-1] + "]"))
+            for m in dotted_series.finditer(clean, cite.start(), cite.end()):
+                issues.append((i, m.start(), m.end(), "Remove full stops", m.group().replace(".", "")))
+            m = re.match(r"\s*,?\s+(p\.\s+)(?=\d+\b)", clean[cite.end():])
+            if m:
+                issues.append((i, cite.end() + m.start(1), cite.end() + m.end(1),
+                               "Drop p. for page", ""))
+        for statute in STATUTE_RE.finditer(clean):
+            m = provision_stop.match(clean, statute.start())
+            if m:
+                issues.append((i, m.start(), m.end(), "Remove provision stop", m.group()[:-1]))
+        if footnote.match(clean) and not re.search(r"\.[\"'’”\])_*]*\s*$", clean):
+            end = len(clean.rstrip())
+            issues.append((i, end, end, "Add final full stop", "."))
+    return sorted(issues, key=lambda issue: (issue[0], issue[1]))
 # Highlighted text: ==like this== (exported as a yellow highlight in Word)
 MARK_RE = re.compile(r"==(?=\S).+?(?<=\S)==")
 # A link to another note: [[Folder/Name]], [[Folder/Name#Heading]], [[Folder/Name|shown text]];
@@ -2008,6 +2059,7 @@ HELP = [
     ("^P", "Search all notes: every line that mentions what you type, in every note. Enter jumps there."),
     ("^B", "Case index: every case cited in any note, with its citation and the notes that mention it."),
     ("Option+J", "Open to-dos in all notes. Type to filter; Enter jumps to a to-do, x ticks it. F10 does the same."),
+    ("Option+K", "Check this note for likely OSCOLA slips. Enter jumps to one; f fixes a mechanical slip and refreshes the list. F9 does the same."),
     ("^L", "Outline: jump to any heading or case in this note."),
     ("#", "Revising"),
     ("Option+C", "Revision cards from your notes: each case brief (^T) is a card (the case and citation on the front, the brief on the back), and so is a bullet that names a case and says something about it. Choose this note, its folder or all notes. Space shows the answer; then 1 again, 2 hard, 3 good. Cards come back after 1, 3, 7, 14, 30, then 60 days; due cards first, then new ones. Esc ends. Progress is kept in UCL Notes, so every Mac shares it. F7 does the same."),
@@ -2058,6 +2110,7 @@ CSI_KEYS = {
     "[F": curses.KEY_END, "OF": curses.KEY_END, "[4~": curses.KEY_END, "[8~": curses.KEY_END,
     "[3~": curses.KEY_DC, "[5~": curses.KEY_PPAGE, "[6~": curses.KEY_NPAGE, "[Z": curses.KEY_BTAB,
     "[21~": curses.KEY_F10,
+    "[20~": curses.KEY_F9,
     "[27;2;13~": "shift-enter", "[13;2u": "shift-enter",
     "[1;3D": "word-left", "[1;5D": "word-left", "[1;3C": "word-right", "[1;5C": "word-right",
     "[3;3~": "delete-word-right", "[3;5~": "delete-word-right",
@@ -2768,6 +2821,8 @@ class App:
             left += "   preparing spell check…"
         right = f"Ln {b.cy + 1}/{len(b.lines)}   {words:,} words "
         barw = width - (1 if left_x + width >= W else 0)  # never write the screen's last cell
+        if active and time.time() < self.msg_until and len(left) > barw and len(self.msg) + 1 <= barw:
+            left = " " + self.msg  # show the whole message in a narrow pane
         bar = left + " " * max(1, barw - len(left) - len(right)) + right
         look = ("match" if self.save_failed else "bar") if active else "bar_off"
         self.put(top_y + height - 1, left_x, bar[:barw].ljust(barw), self.A[look])
@@ -2838,7 +2893,7 @@ class App:
             first = self.get_key()
             if first in ("\r", "\n"):
                 return ("key", "shift-enter")  # Option+Enter on terminals using Option as Meta
-            if first in ("b", "f", "e", "d", "D", "w", "o", "h", "t", "c", "r", "l", "a", "j", "\x7f", "\x08"):
+            if first in ("b", "f", "e", "d", "D", "w", "o", "h", "t", "c", "r", "l", "a", "j", "k", "\x7f", "\x08"):
                 return ("alt", first)
             if isinstance(first, int):  # Esc + an arrow curses already decoded: Option+arrow
                 return ("key", OPTION_ARROWS.get(first))
@@ -2990,7 +3045,10 @@ class App:
                 continue
             if k in ("\x03", "\x11"):
                 return None
-            if on_key and on_key(k, items[sel][1] if items else None):
+            done = on_key(k, items[sel][1] if items else None) if on_key else False
+            if done == "close":
+                return None
+            if done:  # on_key handled the key; the list stays, rebuilt
                 continue
             elif k == curses.KEY_UP:
                 sel -= 1
@@ -3249,6 +3307,43 @@ class App:
         b = self.buf
         b.cy = min(line, len(b.lines) - 1)
         b.cx = min(col, len(b.lines[b.cy]))
+
+    def check_oscola(self):
+        """Option+K: likely OSCOLA slips in this note. Enter jumps to one; f fixes it as one undo
+        step, and the list then shows what's left."""
+        b = self.buf
+        if not oscola_issues(b.lines):
+            self.say("No OSCOLA slips found in this note")
+            return
+
+        def build(query):
+            items = []
+            for issue in oscola_issues(b.lines):
+                i, col, end, message, fix = issue
+                label = f"{i + 1}  {message}  {self.snippet(b.lines[i], col, max(1, end - col))}"
+                if query.lower() in label.lower():
+                    items.append((label, issue))
+            return items
+
+        def on_key(key, issue):
+            if key != "f" or issue is None:
+                return False
+            i, col, end, message, fix = issue
+            if fix is None:
+                self.say("This one needs your judgement")
+                return True
+            b.checkpoint("oscola")
+            b.lines[i] = b.lines[i][:col] + fix + b.lines[i][end:]
+            b.cy, b.cx = i, col + len(fix)
+            if oscola_issues(b.lines):
+                return True
+            self.say("No OSCOLA slips found in this note")
+            return "close"
+
+        choice = self.pick(lambda: f"OSCOLA — {len(oscola_issues(b.lines))} slips", build,
+                           guide="Enter jumps · f fixes the selected slip · Esc closes", on_key=on_key)
+        if choice:
+            self.goto(b.path, choice[0], choice[1])
 
     @staticmethod
     def snippet(line, j, n):
@@ -4292,6 +4387,7 @@ class App:
         items += [None, ("Open linked note" if self.link_at() else "Notes linking here", "Option+L", ["links"]),
                   ("Replace…", "Option+R", ["replace"]), ("Revision cards…", "Option+C", ["cards"]),
                   ("Open to-dos…", "Option+J", ["todos"]),
+                  ("Check OSCOLA…", "Option+K", ["oscola"]),
                   ("Abbreviations…", "Option+A", ["abbreviations"]),
                   ("Export…", "Option+E", ["export"]), ("Themes…", "Option+T", ["themes"])]
         H, W = self.scr.getmaxyx()
@@ -4406,6 +4502,7 @@ class App:
                 return {"b": "word-left", "f": "word-right", "e": "export", "d": "split-right",
                         "D": "split-down", "w": "close-pane", "o": "next-pane", "h": "highlight", "t": "themes",
                         "c": "cards", "r": "replace", "l": "links", "a": "abbreviations", "j": "todos",
+                        "k": "oscola",
                         "\x7f": "delete-word-left", "\x08": "delete-word-left"}[r[1]]
             return r[1]  # a curses key, a name, or None for keys we don't use
         if key == curses.KEY_MOUSE:
@@ -4560,6 +4657,8 @@ class App:
             self.edit_abbreviations()
         elif key in ("cards", curses.KEY_F7):
             self.revise()
+        elif key in ("oscola", curses.KEY_F9):
+            self.check_oscola()
         elif key == "links":
             self.links()
         elif key == "\x0c":
