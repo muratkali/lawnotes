@@ -455,6 +455,26 @@ class TextTests(unittest.TestCase):
         self.assertEqual(lawnotes.load_abbreviations(f)["RA"], "reasonable adult")
         self.assertEqual(lawnotes.load_abbreviations(f)["CL"], "common law")    # yours win
 
+    def test_adding_and_removing_abbreviations(self):
+        f = os.path.join(tempfile.mkdtemp(dir=TMP), ".abbreviations.txt")
+        lawnotes.set_abbreviation("CT", "constructive trust", f)              # a new list starts with the header
+        self.assertTrue(open(f).read().startswith("# Abbreviations"))
+        lawnotes.set_abbreviation("RT", "resulting trust", f)
+        lawnotes.set_abbreviation("CT", "Constructive Trust", f)              # changed in place
+        lawnotes.set_abbreviation("RT", None, f)                              # removed
+        lawnotes.set_abbreviation("EL", None, f)                              # a built-in one: turned off
+        ab = lawnotes.load_abbreviations(f)
+        self.assertEqual((ab["CT"], "RT" in ab, "EL" in ab, ab["CL"]), ("Constructive Trust", False, False, "Common Law"))
+        self.assertEqual([l for l in open(f).read().splitlines() if not l.startswith("#")], ["CT = Constructive Trust", "EL ="])
+        self.assertEqual(os.listdir(os.path.dirname(f)), [".abbreviations.txt"])  # no temp file left
+        for short in ("AC", "QB", "LJ", "D", "C", "C T", "2x"):             # citations, judges, parties, junk
+            self.assertIsNotNone(lawnotes.abbreviation_problem(short), short)
+        self.assertIsNone(lawnotes.abbreviation_problem("DoC"))
+        notes = [["In EQ, B holds on a RT for A", "a CT; [1932] AC 562; esp. here"], ["EQ again", "an ET/RT", "EQUITY"]]
+        self.assertEqual(lawnotes.abbreviation_suggestions(notes, {"RT": "resulting trust"}),
+                         [("EQ", "Equity", 2), ("CT", "constructive trust", 1), ("esp", "especially", 1)])
+        self.assertFalse(set(lawnotes.SUGGESTED_ABBREVIATIONS) & lawnotes.NEVER_EXPAND)
+
     def test_highlight_markup(self):
         spans = lambda t: [m.group() for m in lawnotes.MARK_RE.finditer(t)]
         self.assertEqual(spans("The ==ratio decidendi== binds; ==Caparo== too"), ["==ratio decidendi==", "==Caparo=="])
@@ -1116,6 +1136,50 @@ class SessionTests(unittest.TestCase):
         s.keys(b" CLR\x13", 0.5)
         self.assertTrue(s.quit())
         self.assertEqual(open(note).read(), "x The Common Law and Equity Law; the Lord Chancellor. CL pasted  CLR\n")
+
+    def test_option_a_abbreviations(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Trusts", "Abbrev.md")
+        os.makedirs(os.path.dirname(note), exist_ok=True)
+        open(note, "w").write("In EQ, B holds on a constructive trust\n")
+        mine = os.path.join(lawnotes.NOTES_DIR, ".abbreviations.txt")
+        self.assertFalse(os.path.exists(mine))
+        try:
+            s = Session(note)
+            screen = s.keys(b"\x1ba", 0.8)                                  # Option+A
+            self.assertIn("EQ → Equity   suggested: used 1× in your notes", screen)
+            self.assertIn("CL → Common Law", screen)
+            s.keys(b"EQ \xe2\x86\x92\r", 0.5)                               # filter to the suggestion, Enter
+            s.keys(b"\r", 0.5)                                               # keep "Equity"
+            # select "constructive trust" (Shift+End from its start) and abbreviate it
+            s.keys(b"\x01" + b"\x1b[1;3C" * 6 + b"\x1b[1;2F", 0.3)
+            screen = s.keys(b"\x1ba", 0.8)
+            self.assertIn("+ Abbreviation for “constructive trust”…", screen)
+            s.keys(b"\r", 0.4)
+            s.keys(b"CT\r", 0.5)
+            s.keys(b"\x1b[1;2F\x05 so EQ and CT.\x13", 0.6)                  # both expand straight away
+            self.assertTrue(s.quit())
+            self.assertEqual(open(note).read(), "In EQ, B holds on a constructive trust so Equity and constructive trust.\n")
+            self.assertEqual([l for l in open(mine).read().splitlines() if not l.startswith("#")],
+                             ["EQ = Equity", "CT = constructive trust"])
+        finally:
+            if os.path.exists(mine):
+                os.remove(mine)
+
+    def test_lists_scroll_without_half_drawn_frames(self):
+        folder = os.path.join(lawnotes.NOTES_DIR, "Many")
+        os.makedirs(folder, exist_ok=True)
+        for i in range(80):
+            open(os.path.join(folder, f"Note {i:02}.md"), "w").write(f"# Note {i}\n")
+        s = Session(os.path.join(folder, "Note 00.md"))
+        s.keys(b"\x0f", 0.6)                                             # ^O, then the wheel over the list
+        before = len(s.out)
+        s.keys(b"\x1b[<65;20;20M" * 12, 0.6)
+        drawn = s.out[before:]
+        outside = re.sub(rb"\x1b\[\?2026h.*?\x1b\[\?2026l", b"", drawn, flags=re.S)
+        self.assertGreater(len(drawn), 500)
+        self.assertEqual(outside, b"")                                   # every frame is one synchronised update
+        s.keys(b"\x1b", 0.4)
+        self.assertTrue(s.quit())
 
     def test_option_up_down_jump_to_ends(self):
         note = os.path.join(lawnotes.NOTES_DIR, "Ends.md")

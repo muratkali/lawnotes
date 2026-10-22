@@ -407,9 +407,24 @@ MARK_RE = re.compile(r"==(?=\S).+?(?<=\S)==")
 # A link to another note: [[Folder/Name]], [[Folder/Name#Heading]], [[Folder/Name|shown text]];
 # groups: the note, the heading, the shown text
 LINK_RE = re.compile(r"\[\[\s*([^\s\[\]|#][^\[\]|#]*)(?:#([^\[\]|]*))?(?:\|([^\[\]]*))?\]\]")
-# Abbreviations expand when a word is finished (space, punctuation, Enter); add your own in
-# ABBREV_FILE, one "SHORT = Long form" per line (lawnotes --abbreviations opens it).
+# Abbreviations expand when a word is finished (space, punctuation, Enter); add your own with
+# Option+A, or in ABBREV_FILE, one "SHORT = Long form" per line ("SHORT =" turns a built-in one off).
 DEFAULT_ABBREVIATIONS = {"CL": "Common Law", "EL": "Equity Law", "LCh": "Lord Chancellor"}
+ABBREV_HEADER = ("# Abbreviations: they expand when you finish the word (space, punctuation, Enter).\n"
+                 "# One per line: SHORT = Long form. Exact case; whole words only. SHORT = (nothing) turns one off.\n")
+# Offered in the Option+A list when your notes already use the short form
+SUGGESTED_ABBREVIATIONS = {
+    "EQ": "Equity", "RT": "resulting trust", "CT": "constructive trust", "ET": "express trust",
+    "DoC": "duty of care", "BoD": "breach of duty", "PQ": "problem question", "EP": "European Parliament",
+    "HR": "Human Rights", "esp": "especially", "bc": "because", "smth": "something", "govt": "government",
+}
+# Never abbreviations: they're part of citations, court names and judges' titles ([1932] AC 562,
+# [2004] EWHC 786 (QB), Smith LJ), so expanding them as you type would change what you wrote
+NEVER_EXPAND = {
+    "AC", "QB", "KB", "Ch", "ChD", "Fam", "WLR", "ER", "All", "LR", "UKSC", "UKHL", "UKPC", "EWCA", "EWHC",
+    "Civ", "Crim", "Admin", "HL", "CA", "SC", "PC", "CJ", "LJ", "LJJ", "MR", "VC", "JSC", "LC", "QC", "KC",
+    "ECR", "CMLR", "EHRR", "ECHR", "ECJ", "TEU", "TFEU", "EU", "UK", "DPP", "BCLC", "WTLR", "LQR", "CLJ",
+}
 ABBREV_ENDS = " .,;:!?)]}\"'\u201d\u2019"
 BULLET_RE = re.compile(r"^(\s*)([-*+]|\d+[.)]|>)(\s+)(\[[ xX]\]\s+)?")
 BOLD_RE = re.compile(r"\*\*[^*]+\*\*")
@@ -1254,11 +1269,66 @@ def load_abbreviations(path=None):
         with open(path or ABBREV_FILE, encoding="utf-8") as f:
             for line in f:
                 short, sep, long = line.partition("=")
-                if sep and short.strip() and not short.strip().startswith("#") and long.strip():
-                    out[short.strip()] = long.strip()
+                if sep and short.strip() and not short.strip().startswith("#"):
+                    if long.strip():
+                        out[short.strip()] = long.strip()
+                    else:
+                        out.pop(short.strip(), None)  # "CL =" turns a built-in one off
     except OSError:
         pass
     return out
+
+
+def abbreviation_problem(short):
+    """Why a short form can't be an abbreviation, or None if it can."""
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", short):
+        return "Use letters and digits only, starting with a letter (e.g. CT)"
+    if len(short) == 1:
+        return "One letter is too short: D, V and C are party labels, and single letters appear in names"
+    if short in NEVER_EXPAND:
+        return f"{short} is part of citations, courts and judges' titles, so it can't expand"
+    return None
+
+
+def set_abbreviation(short, long, path=None):
+    """Add or change one abbreviation in your list (long=None removes it), keeping the rest of the
+    file as it is; written whole, so iCloud never syncs half a list."""
+    path = path or ABBREV_FILE
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        lines = ABBREV_HEADER.splitlines()
+    mine = lambda line: (line.partition("=")[1] and not line.lstrip().startswith("#")
+                         and line.partition("=")[0].strip() == short)
+    new = None if long is None and short not in DEFAULT_ABBREVIATIONS else f"{short} = {long or ''}".rstrip()
+    found = [i for i, line in enumerate(lines) if mine(line)]
+    for i in reversed(found[1:]):
+        del lines[i]
+    if found:
+        lines[found[0]:found[0] + 1] = [new] if new is not None else []
+    elif new is not None:
+        lines.append(new)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def abbreviation_suggestions(notes, current):
+    """[(short, long, uses)] for suggested abbreviations your notes already use and you don't have."""
+    out = []
+    for short, long in SUGGESTED_ABBREVIATIONS.items():
+        if short in current:
+            continue
+        word = re.compile(rf"(?<![\w/]){re.escape(short)}(?![\w/])")
+        uses = sum(len(word.findall(line)) for lines in notes for line in lines)
+        if uses:
+            out.append((short, long, uses))
+    return sorted(out, key=lambda s: -s[2])
 
 
 def expand_abbreviation(line, cx, abbreviations):
@@ -1769,7 +1839,8 @@ HELP = [
     ("Scroll", "The mouse wheel moves the view only; the cursor stays where it was, and typing carries on there."),
     ("Right-click", "A menu: fixes for a misspelt word, cut / copy / paste, highlight, italic, bold, undo, split panes, export, themes."),
     ("//", "A comment to yourself: everything after // on a line is highlighted, and left out when you export."),
-    ("CL  EL  LCh", "Abbreviations expand as you type: CL → Common Law, EL → Equity Law, LCh → Lord Chancellor. Add your own with  lawnotes --abbreviations  (one  SHORT = Long form  per line). ^Z undoes an expansion."),
+    ("CL  EL  LCh", "Abbreviations expand as you type: CL → Common Law, EL → Equity Law, LCh → Lord Chancellor. ^Z undoes an expansion."),
+    ("Option+A", "Abbreviations: add your own (select a phrase first to abbreviate it), change or remove one, or take a suggestion from the shorthand your notes already use (EQ, CT, esp…)."),
     ("Tables", "Copy a table in Word and paste it (⌘V or ^V): it becomes a Markdown table with lined-up columns, and exports back to Word as a real table."),
     ("^C  ^X  ^V", "Copy / cut / paste using the Mac clipboard: what you copy flashes green. With nothing selected, ^C and ^X take the whole line. ⌘V pastes too, but ⌘C can't copy text selected inside Law Notes (Terminal takes ⌘C): use ^C."),
     ("Typing", "With text selected, typing or Backspace replaces it."),
@@ -2572,7 +2643,7 @@ class App:
             first = self.get_key()
             if first in ("\r", "\n"):
                 return ("key", "shift-enter")  # Option+Enter on terminals using Option as Meta
-            if first in ("b", "f", "e", "d", "D", "w", "o", "h", "t", "c", "r", "l", "\x7f", "\x08"):
+            if first in ("b", "f", "e", "d", "D", "w", "o", "h", "t", "c", "r", "l", "a", "\x7f", "\x08"):
                 return ("alt", first)
             if isinstance(first, int):  # Esc + an arrow curses already decoded: Option+arrow
                 return ("key", OPTION_ARROWS.get(first))
@@ -3608,6 +3679,66 @@ class App:
             return None
         return (a, c) if a < c else (c, a)
 
+    def abbreviations_menu(self):
+        """Option+A: your abbreviations, with suggestions from the shorthand your notes already use.
+        With a phrase selected, the first choice makes an abbreviation for it."""
+        phrase = self.selected_text().strip() if self.selection() else ""
+        if "\n" in phrase or len(phrase) > 80:
+            phrase = ""
+        suggested = abbreviation_suggestions([lines for _, _, lines in self.all_notes()], self.abbreviations)
+
+        def build(query):
+            items = [(f"+ Abbreviation for “{phrase}”…", ("new", phrase))] if phrase else []
+            items.append(("+ New abbreviation…", ("new", "")))
+            items += [(f"{s} → {l}   suggested: used {n}× in your notes", ("suggested", s, l)) for s, l, n in suggested]
+            items += [(f"{s} → {l}", ("change", s, l))
+                      for s, l in sorted(self.abbreviations.items(), key=lambda kv: kv[0].lower())]
+            items.append(("Edit the list as a note", ("file",)))
+            return [it for it in items if query.lower() in it[0].lower()]
+
+        choice = self.pick("Abbreviations", build, guide="They expand when you finish the word (space, punctuation, "
+                           "Enter); ^Z undoes one. Exact case, whole words only.")
+        if not choice:
+            return
+        if choice[0] == "file":
+            if not os.path.exists(ABBREV_FILE):
+                try:
+                    os.makedirs(os.path.dirname(ABBREV_FILE), exist_ok=True)
+                    with open(ABBREV_FILE, "w", encoding="utf-8") as f:
+                        f.write(ABBREV_HEADER + "".join(f"{s} = {l}\n" for s, l in DEFAULT_ABBREVIATIONS.items()))
+                except OSError as e:
+                    self.say(f"Couldn't make the list ({e.strerror or e})", 8)
+                    return
+            self.open(ABBREV_FILE)
+            return
+        if choice[0] == "new":
+            long = choice[1]
+            short = self.prompt(f"Short form for “{long}”: " if long else "Short form (e.g. CT): ")
+            short = (short or "").strip()
+            if not short:
+                return
+            problem = abbreviation_problem(short)
+            if problem:
+                self.say(problem, 8)
+                return
+            long = long or (self.prompt(f"“{short}” expands to: ", self.abbreviations.get(short, "")) or "").strip()
+            if not long:
+                return
+        else:
+            short = choice[1]
+            hint = " (empty removes it)" if choice[0] == "change" else ""
+            long = self.prompt(f"“{short}” expands to{hint}: ", choice[2])
+            if long is None or (not long.strip() and choice[0] == "suggested"):
+                return
+            long = long.strip() or None
+        try:
+            set_abbreviation(short, long)
+        except OSError as e:
+            self.say(f"Couldn't save the abbreviation ({e.strerror or e})", 8)
+            return
+        self.abbreviations = load_abbreviations()
+        self.say(f"{short} → {long} ✓" if long else f"{short} removed ✓")
+
     def selected_text(self):
         (y1, x1), (y2, x2) = self.selection()
         lines = self.buf.lines
@@ -3853,6 +3984,7 @@ class App:
             items += [("Next pane", "Option+O", ["next-pane"]), ("Close this pane", "Option+W", ["close-pane"])]
         items += [None, ("Open linked note" if self.link_at() else "Notes linking here", "Option+L", ["links"]),
                   ("Replace…", "Option+R", ["replace"]), ("Revision cards…", "Option+C", ["cards"]),
+                  ("Abbreviations…", "Option+A", ["abbreviations"]),
                   ("Export…", "Option+E", ["export"]), ("Themes…", "Option+T", ["themes"])]
         choices = [i for i, it in enumerate(items) if it]
         width = max(len(it[0]) + len(it[1]) for it in items if it) + 5
@@ -3963,7 +4095,7 @@ class App:
             if r[0] == "alt":
                 return {"b": "word-left", "f": "word-right", "e": "export", "d": "split-right",
                         "D": "split-down", "w": "close-pane", "o": "next-pane", "h": "highlight", "t": "themes",
-                        "c": "cards", "r": "replace", "l": "links",
+                        "c": "cards", "r": "replace", "l": "links", "a": "abbreviations",
                         "\x7f": "delete-word-left", "\x08": "delete-word-left"}[r[1]]
             return r[1]  # a curses key, a name, or None for keys we don't use
         if key == curses.KEY_MOUSE:
@@ -4112,6 +4244,8 @@ class App:
             self.export()
         elif key in ("themes", curses.KEY_F6):
             self.choose_theme()
+        elif key == "abbreviations":
+            self.abbreviations_menu()
         elif key in ("cards", curses.KEY_F7):
             self.revise()
         elif key == "links":
