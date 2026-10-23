@@ -520,6 +520,15 @@ class TextTests(unittest.TestCase):
         self.assertIn("beta", r.stdout)
         self.assertIn("beta", lawnotes.HELP_TITLE)
 
+    def test_without_a_terminal_it_says_so_and_logs_no_crash(self):
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "lawnotes.py")],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("needs a terminal window", r.stderr)
+        log = open(lawnotes.LOG_FILE).read()
+        self.assertIn("not started: no terminal window", log)
+        self.assertNotIn("CRASH", log)
+
     def test_failed_history_snapshot_is_logged(self):
         broken = os.path.join(TMP, "history-is-a-file")
         open(broken, "w").write("not a git store")

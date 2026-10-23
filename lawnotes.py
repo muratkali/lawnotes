@@ -5192,6 +5192,13 @@ def main():
     except ValueError as e:
         print(f"lawnotes: {e}", file=sys.stderr)
         sys.exit(2)
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        # Run from a script or another app's command box (such as ! in Claude Code): curses can't
+        # take the keyboard there, so say so instead of logging it as a crash.
+        log("not started: no terminal window")
+        print("Law Notes needs a terminal window. Open it in Terminal, Ghostty or a herdr pane.",
+              file=sys.stderr)
+        sys.exit(1)
     os.makedirs(NOTES_DIR, exist_ok=True)
     locale.setlocale(locale.LC_ALL, "")
     os.environ.setdefault("ESCDELAY", "25")
