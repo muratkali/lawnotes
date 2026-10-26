@@ -50,8 +50,10 @@ import re
 import select
 import shutil
 import signal
+import stat
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 import time
@@ -1396,41 +1398,113 @@ def reference_docx(pandoc):
     return path
 
 
-def export_note(path, lines, fmt, tables=False):
+def export_records_file():
+    return os.path.join(CACHE_DIR, "exports.json")
+
+
+def write_export(name, fmt, render):
+    """Render away from the final name, then replace only an unchanged export of ours."""
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+    work = tempfile.mkdtemp(prefix=".lawnotes-", dir=EXPORT_DIR)
+    tmp = os.path.join(work, "export." + fmt)
+    try:
+        render(tmp)
+        made = os.stat(tmp)
+        record_file = export_records_file()
+        try:
+            with open(record_file, encoding="utf-8") as f:
+                records = json.load(f)
+            if not isinstance(records, dict):
+                records = {}
+        except (OSError, ValueError, UnicodeError):
+            records = {}
+        number = 1
+        reason = None
+        while True:
+            filename = name + (f" ({number})" if number > 1 else "") + "." + fmt
+            out = os.path.abspath(os.path.join(EXPORT_DIR, filename))
+            try:
+                old = os.lstat(out)
+            except FileNotFoundError:
+                try:
+                    os.link(tmp, out)  # EEXIST means another export claimed this name first
+                    break
+                except FileExistsError:
+                    if number == 1:
+                        reason = "name already used"
+                    continue
+            saved = records.get(out)
+            valid = (isinstance(saved, dict) and type(saved.get("size")) is int
+                     and type(saved.get("mtime_ns")) is int)
+            if (stat.S_ISREG(old.st_mode) and valid
+                    and saved.get("size") == old.st_size and saved.get("mtime_ns") == old.st_mtime_ns):
+                os.replace(tmp, out)
+                break
+            if number == 1 and reason is None:
+                reason = (filename + " changed" if valid and stat.S_ISREG(old.st_mode)
+                          else "no export record" if stat.S_ISREG(old.st_mode) else "existing file kept")
+            number += 1
+        records[out] = {"size": made.st_size, "mtime_ns": made.st_mtime_ns}
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        fd, record_tmp = tempfile.mkstemp(prefix=".exports-", suffix=".json", dir=CACHE_DIR)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(records, f)
+            os.replace(record_tmp, record_file)
+        finally:
+            if os.path.exists(record_tmp):
+                os.remove(record_tmp)
+        return out, reason
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        os.rmdir(work)
+
+
+def export_document(name, text, fmt, pandoc, pack=False, details=False):
+    """Make a Word or PDF export, then give it a safe Downloads name."""
+    # each line of a note stays a line; no "simple tables", which plain notes trigger by accident
+    source = "markdown+hard_line_breaks+mark-simple_tables-multiline_tables"  # ==text== highlights
+
+    def render(out):
+        if fmt == "docx":
+            args = [pandoc, "-f", source, "-t", "docx", "--reference-doc", reference_docx(pandoc)]
+            if pack:
+                args.append("--toc")
+            r = subprocess.run(args + ["-o", out], input=text, capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                raise ExportError(r.stderr.strip()[-200:] or "pandoc failed")
+        elif fmt == "pdf":
+            with tempfile.TemporaryDirectory() as d:
+                html, css = os.path.join(d, "note.html"), os.path.join(d, "note.css")
+                with open(css, "w") as f:
+                    f.write(EXPORT_CSS)  # our stylesheet replaces pandoc's (which follows dark mode)
+                args = [pandoc, "-f", source, "-t", "html5", "-s"]
+                if pack:
+                    args.append("--toc")
+                args += ["--metadata", "pagetitle=" + name, "-c", css, "--embed-resources", "-o", html]
+                r = subprocess.run(args, input=text, capture_output=True, text=True, timeout=120)
+                if r.returncode != 0:
+                    raise ExportError(r.stderr.strip()[-200:] or "pandoc failed")
+                r = subprocess.run([compiled_helper("html2pdf"), html, os.path.abspath(out)],
+                                   capture_output=True, text=True, timeout=120)
+                if r.returncode != 0 or not os.path.exists(out):
+                    raise ExportError("couldn't make the PDF")
+        else:
+            raise ExportError(f"unknown format {fmt}")
+
+    out, reason = write_export(name, fmt, render)
+    return (out, reason) if details else out
+
+
+def export_note(path, lines, fmt, tables=False, details=False):
     """Write the note as .docx or .pdf into EXPORT_DIR; returns the new file's path.
     With tables, a Table of Cases and a Table of Legislation follow the title."""
     pandoc = find_tool("pandoc")
     if not pandoc:
         raise ExportError("export needs pandoc: run  brew install pandoc  (free)")
     name = os.path.splitext(os.path.basename(path))[0]
-    os.makedirs(EXPORT_DIR, exist_ok=True)
-    out = os.path.join(EXPORT_DIR, f"{name}.{fmt}")
-    text = export_markdown(lines, tables)
-    # each line of a note stays a line; no "simple tables", which plain notes trigger by accident
-    source = "markdown+hard_line_breaks+mark-simple_tables-multiline_tables"  # ==text== highlights
-    if fmt == "docx":
-        r = subprocess.run([pandoc, "-f", source, "-t", "docx", "--reference-doc", reference_docx(pandoc),
-                            "-o", out], input=text, capture_output=True, text=True, timeout=120)
-        if r.returncode != 0:
-            raise ExportError(r.stderr.strip()[-200:] or "pandoc failed")
-        return out
-    if fmt == "pdf":
-        import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            html, css = os.path.join(d, "note.html"), os.path.join(d, "note.css")
-            with open(css, "w") as f:
-                f.write(EXPORT_CSS)  # our own stylesheet replaces pandoc's (which follows dark mode)
-            r = subprocess.run([pandoc, "-f", source, "-t", "html5", "-s", "--metadata", f"pagetitle={name}",
-                                "-c", css, "--embed-resources", "-o", html],
-                               input=text, capture_output=True, text=True, timeout=120)
-            if r.returncode != 0:
-                raise ExportError(r.stderr.strip()[-200:] or "pandoc failed")
-            r = subprocess.run([compiled_helper("html2pdf"), html, os.path.abspath(out)],
-                               capture_output=True, text=True, timeout=120)
-            if r.returncode != 0 or not os.path.exists(out):
-                raise ExportError("couldn't make the PDF")
-        return out
-    raise ExportError(f"unknown format {fmt}")
+    return export_document(name, export_markdown(lines, tables), fmt, pandoc, details=details)
 
 
 # Months written out, so the title page doesn't follow the Mac's language setting.
@@ -1547,40 +1621,15 @@ def revision_pack_markdown(notes, folder, when=None, tables=False):
     return "\n".join(parts).rstrip("\n") + "\n"
 
 
-def export_revision_pack(folder, notes, fmt, tables=False, when=None):
+def export_revision_pack(folder, notes, fmt, tables=False, when=None, details=False):
     """Write every note in a folder as one .docx or .pdf in EXPORT_DIR. Returns the new file's path.
     Same pandoc treatment as one note, plus a contents list."""
     pandoc = find_tool("pandoc")
     if not pandoc:
         raise ExportError("export needs pandoc: run  brew install pandoc  (free)")
     name = pack_export_name(folder)
-    os.makedirs(EXPORT_DIR, exist_ok=True)
-    out = os.path.join(EXPORT_DIR, name + "." + fmt)
     text = revision_pack_markdown(notes, folder, when, tables)
-    source = "markdown+hard_line_breaks+mark-simple_tables-multiline_tables"  # same as one note
-    if fmt == "docx":
-        r = subprocess.run([pandoc, "-f", source, "-t", "docx", "--reference-doc", reference_docx(pandoc),
-                            "--toc", "-o", out], input=text, capture_output=True, text=True, timeout=120)
-        if r.returncode != 0:
-            raise ExportError(r.stderr.strip()[-200:] or "pandoc failed")
-        return out
-    if fmt == "pdf":
-        import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            html, css = os.path.join(d, "note.html"), os.path.join(d, "note.css")
-            with open(css, "w") as f:
-                f.write(EXPORT_CSS)
-            r = subprocess.run([pandoc, "-f", source, "-t", "html5", "-s", "--toc",
-                                "--metadata", "pagetitle=" + name, "-c", css, "--embed-resources", "-o", html],
-                               input=text, capture_output=True, text=True, timeout=120)
-            if r.returncode != 0:
-                raise ExportError(r.stderr.strip()[-200:] or "pandoc failed")
-            r = subprocess.run([compiled_helper("html2pdf"), html, os.path.abspath(out)],
-                               capture_output=True, text=True, timeout=120)
-            if r.returncode != 0 or not os.path.exists(out):
-                raise ExportError("couldn't make the PDF")
-        return out
-    raise ExportError(f"unknown format {fmt}")
+    return export_document(name, text, fmt, pandoc, pack=True, details=details)
 
 
 def load_abbreviations(path=None):
@@ -2199,7 +2248,7 @@ HELP = [
     ("^K", "Cut the line (press repeatedly to cut several lines)."),
     ("^U", "Paste the cut lines above the cursor."),
     ("^Z  ^Y", "Undo / redo. Undo also brings back a selection you clicked or moved away from."),
-    ("Option+E", "Export the note to Word (.docx) or PDF, into Downloads. Case names are put in italics (OSCOLA), [^1] footnotes become real footnotes. F5 does the same. For an essay, pick “with tables of cases and legislation”: OSCOLA tables after the title, then a new page. Revision pack: every note in this note's folder, as one document named “Folder revision pack”, with a title page (the folder and the date), a contents list, then each note. With tables, one table of cases and one of legislation cover the whole pack."),
+    ("Option+E", "Export the note to Word (.docx) or PDF, into Downloads. An unchanged export is replaced; an edited file or one with no export record is kept, and the new export gets (2), (3) and so on. The status bar names the file and says why. Case names are put in italics (OSCOLA), [^1] footnotes become real footnotes. F5 does the same. For an essay, pick “with tables of cases and legislation”: OSCOLA tables after the title, then a new page. Revision pack: every note in this note's folder, as one document named “Folder revision pack”, with a title page (the folder and the date), a contents list, then each note. With tables, one table of cases and one of legislation cover the whole pack."),
     ("^R", "Version history: snapshots of your notes are taken automatically every few minutes while you work. Pick one to restore it (^Z undoes the restore)."),
     ("#", "Formatting (Markdown)"),
     ("# Title", "Heading;  ## Section  for a subheading."),
@@ -4343,15 +4392,15 @@ class App:
         self.draw()
         try:
             if notes is None:
-                out = export_note(self.buf.path, self.buf.lines, fmt, tables)
+                out, reason = export_note(self.buf.path, self.buf.lines, fmt, tables, details=True)
                 none = tables and not any(authorities(self.buf.lines).values())
                 what = os.path.basename(self.buf.path)
             else:
-                out = export_revision_pack(folder, notes, fmt, tables)
+                out, reason = export_revision_pack(folder, notes, fmt, tables, details=True)
                 found = authorities([line for _, lines in notes for line in lines])
                 none = tables and not any(found.values())
                 what = folder + " revision pack"
-            self.say("Exported to " + out.replace(os.path.expanduser("~"), "~", 1)
+            self.say(os.path.basename(out) + " saved" + (": " + reason if reason else "")
                      + (" (no cases or legislation found for the tables)" if none else ""), 10)
             log(f"exported {what} as {fmt}{' with tables' * tables}")
         except (ExportError, OSError, subprocess.SubprocessError) as e:
