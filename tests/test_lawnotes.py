@@ -165,6 +165,7 @@ class AutocompleteTests(unittest.TestCase):
             return [(self.source, "Source.md", self.lines)]
 
         self.app.all_notes = all_notes
+        self.app.buffers = lambda: [(None, self.app.buf)]
 
     def draft(self, text, col=None):
         self.app.buf.lines = [text]
@@ -195,13 +196,16 @@ class AutocompleteTests(unittest.TestCase):
         self.draft("Dono")
         with patch.object(lawnotes.time, "time", return_value=101):
             self.assertTrue(self.app.complete_case())
-        self.assertEqual(self.scans, 1)
+        self.assertEqual(self.scans, 2)  # completion edited the open buffer
+        with patch.object(lawnotes.time, "time", return_value=102):
+            self.app.case_entries()
+        self.assertEqual(self.scans, 3)
         self.lines.append("Newcastle v United")
         self.stamp += 1
         self.draft("New")
-        with patch.object(lawnotes.time, "time", return_value=106):
+        with patch.object(lawnotes.time, "time", return_value=108):
             self.assertTrue(self.app.complete_case())
-        self.assertEqual(self.scans, 2)
+        self.assertEqual(self.scans, 4)
 
     def test_tab_contexts_leave_text_untouched(self):
         for text, col in (("Ca", None), ("CapaX", 4), ("// Capa", None),
@@ -214,12 +218,59 @@ class AutocompleteTests(unittest.TestCase):
                 self.assertEqual(self.app.buf.lines, [text])
         self.assertEqual(self.scans, 0)  # no scan for an excluded context
 
+    def test_midline_and_common_words_do_not_complete(self):
+        self.lines += ["Theakston v MGN Ltd", "Forbes v Smith", "Butler v Jones", "Perry v Brown"]
+        self.draft("Donoghue v Stevenson", len("Donoghue"))
+        self.assertFalse(self.app.complete_case())
+        for word in ("the", "for", "but", "per", "not", "with", "his", "can"):
+            with self.subTest(word=word):
+                self.draft(word)
+                self.assertFalse(self.app.complete_case())
+        self.assertEqual(self.scans, 0)
+
+    def test_unsaved_open_case_refreshes_cached_entries(self):
+        b = self.app.buf
+        self.app.all_notes = lambda: [(self.source, "Source.md", self.lines),
+                                      (b.path, "Draft.md", b.lines)]
+        self.draft("Dono")
+        self.assertTrue(self.app.complete_case())
+        b.checkpoint("type")
+        b.lines = ["Omega v Beta", "Ome"]
+        b.cy, b.cx = 1, 3
+        self.assertTrue(self.app.complete_case())
+        self.assertEqual(b.lines[1], "Omega v Beta")
+
+    def test_unsaved_case_in_another_pane_is_indexed(self):
+        other = lawnotes.Buffer(os.path.join(TMP, "autocomplete-other.md"))
+        other.lines = ["Meridian v North"]
+        other.version += 1
+        self.app.buffers = lambda: [(None, self.app.buf), (None, other)]
+        self.assertTrue(any(c["name"] == "Meridian v North" for _, c in self.app.case_entries()))
+        other.checkpoint("type")
+        other.lines = ["Orion v North"]
+        names = [c["name"] for _, c in self.app.case_entries()]
+        self.assertIn("Orion v North", names)
+        self.assertNotIn("Meridian v North", names)
+
+    def test_apostrophe_and_hyphen_are_part_of_prefix(self):
+        self.lines += ["O'Brien v Jones", "O’Connor v Smith", "Smith-Jones v Clark"]
+        for prefix, expected in (("O'Bri", "O'Brien v Jones"),
+                                 ("O’Con", "O’Connor v Smith"),
+                                 ("Smith-Jo", "Smith-Jones v Clark")):
+            with self.subTest(prefix=prefix):
+                self.draft(prefix)
+                self.assertTrue(self.app.complete_case())
+                self.assertEqual(self.app.buf.lines, [expected])
+        self.draft("O'B")
+        self.assertFalse(self.app.complete_case())
+
     def test_picker_shows_at_most_ten_and_name_without_citation(self):
         self.lines = ["Alpha0 v Beta"] * 3 + [f"Alpha{i} v Beta" for i in range(1, 15)]
         shown = []
 
         def pick(title, build, **kwargs):
             shown.extend(label for label, _ in build(""))
+            self.assertEqual([label for label, _ in build("Alpha9")], ["Alpha9 v Beta"])
             return None
 
         self.app.pick = pick
@@ -228,6 +279,37 @@ class AutocompleteTests(unittest.TestCase):
         self.assertEqual(len(shown), 10)
         self.assertEqual(shown[0], "Alpha0 v Beta")
         self.assertEqual(self.app.buf.lines, ["Alp"])
+
+    def test_case_index_keeps_first_citation_and_comment_hits(self):
+        self.lines.append("// Commented v Case [2020] AC 1")
+        entries = self.app.case_entries()
+        cap = next((label, c) for label, c in entries if c["name"] == "Caparo Industries plc v Dickman")
+        self.assertIn("[1990] AC 605", cap[0])
+        self.assertEqual(cap[1]["best_cite"], "[1990] 2 AC 605")
+        self.assertTrue(any(c["name"] == "Commented v Case" for _, c in entries))
+
+    def test_case_index_drops_shortened_and_renamed_hits(self):
+        with open(self.source, "w") as f:
+            f.write("header\nDonoghue v Stevenson\nDonoghue v Stevenson\n")
+        self.lines = ["header", "Donoghue v Stevenson", "Donoghue v Stevenson"]
+        choice = next(c for _, c in self.app.case_entries() if c["name"] == "Donoghue v Stevenson")
+        self.app.pick = lambda *args, **kwargs: choice
+        messages = []
+        self.app.say = messages.append
+        self.app.goto = lambda *args, **kwargs: self.fail("^B opened a stale hit")
+        self.lines = [""]
+        self.app.case_index()
+        self.assertIn("no longer", messages[-1])
+
+        self.app._cases = (0.0, None, None)
+        self.lines = ["Donoghue v Stevenson"]
+        self.app.case_entries()
+        renamed = self.source + ".renamed"
+        os.rename(self.source, renamed)
+        self.app.all_notes = lambda: [(renamed, "Renamed.md", self.lines)]
+        self.app.case_index()
+        self.assertFalse(os.path.exists(self.source))
+        self.assertIn("no longer", messages[-1])
 
 
 class TextTests(unittest.TestCase):
@@ -1663,6 +1745,47 @@ class SessionTests(unittest.TestCase):
         s.keys(b"\x1bOB\x05\t\x1bOB\x05\t\x13", 0.6)
         self.assertTrue(s.quit())
         self.assertEqual(saved_lines()[2:], ["// Capa    ", "  - x"])
+
+    def test_case_index_ignores_stale_hits_without_creating_a_note(self):
+        root = os.path.join(tempfile.mkdtemp(dir=TMP), "notes")
+        os.makedirs(root)
+        short = os.path.join(root, "Short.md")
+        renamed = os.path.join(root, "Renamed.md")
+        draft = os.path.join(root, "Draft.md")
+        with open(short, "w") as f:
+            f.write("header\nDonoghue v Stevenson\nDonoghue v Stevenson\n")
+        with open(renamed, "w") as f:
+            f.write("Caparo v Dickman\n")
+        with open(draft, "w") as f:
+            f.write("# Draft\n")
+        s = Session(draft, env={"LAWNOTES_DIR": root}, size=(40, 40))
+        self.assertIn("Donoghue", s.keys(b"\x02Donoghue", 0.5))
+        with open(short, "w") as f:
+            f.write("gone\n")
+        self.assertIn("no longer", s.keys(b"\r", 0.5))
+        self.assertIn("Caparo", s.keys(b"\x02Caparo", 0.5))
+        moved = os.path.join(root, "Moved.md")
+        os.rename(renamed, moved)
+        self.assertIn("no longer", s.keys(b"\r", 0.5))
+        self.assertTrue(s.quit())
+        self.assertFalse(os.path.exists(renamed))
+        with open(draft) as f:
+            self.assertEqual(f.read(), "# Draft\n")
+
+    def test_case_tab_keeps_midline_bullet_and_common_word(self):
+        root = os.path.join(tempfile.mkdtemp(dir=TMP), "notes")
+        os.makedirs(root)
+        source, draft = os.path.join(root, "Cases.md"), os.path.join(root, "Draft.md")
+        with open(source, "w") as f:
+            f.write("Donoghue v Stevenson [1932] AC 562\nTheakston v MGN Ltd\n")
+        with open(draft, "w") as f:
+            f.write("- Donoghue v Stevenson\nthe\n")
+        s = Session(draft, env={"LAWNOTES_DIR": root}, size=(40, 40))
+        s.keys(b"\x01" + b"\x1bOC" * 11 + b"\t\x13", 0.6)
+        s.keys(b"\x1bOB\x05\t\x13", 0.6)
+        self.assertTrue(s.quit())
+        with open(draft) as f:
+            self.assertEqual(f.read(), "  - Donoghue v Stevenson\nthe    \n")
 
     def test_links_between_notes(self):
         folder = os.path.join(lawnotes.NOTES_DIR, "Linked")
