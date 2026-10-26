@@ -645,6 +645,44 @@ class RevisionTests(unittest.TestCase):
         lawnotes.save_progress({"v": {"box": 1, "at": 130.0}})
         self.assertEqual(sorted(os.listdir(self.dir)), [".revision 2.json", ".revision.json"])
 
+    def test_only_numbered_revision_copies_are_merged(self):
+        path = lawnotes.REVISION_FILE
+        lawnotes.save_progress({"first": {"box": 1, "at": 10.0}})
+        kept = {}
+        for name in (".revision-backup.json", ".revisions.json", ".revision 1.json",
+                     ".revision 02.json", ".revision 2-backup.json"):
+            other = os.path.join(self.dir, name)
+            data = json.dumps({"version": 1, "cards": {name: {"box": 4, "at": 20.0}}})
+            with open(other, "w") as f:
+                f.write(data)
+            kept[other] = data
+        copy = os.path.join(self.dir, ".revision 2.json")
+        with open(copy, "w") as f:
+            json.dump({"version": 1, "cards": {"copy": {"box": 2, "at": 30.0}}}, f)
+        later_copy = os.path.join(self.dir, ".revision 10.json")
+        with open(later_copy, "w") as f:
+            json.dump({"version": 1, "cards": {"later": {"box": 3, "at": 35.0}}}, f)
+        merged = lawnotes.save_progress({"rated": {"box": 1, "at": 40.0}})
+        self.assertEqual(set(merged), {"first", "copy", "later", "rated"})
+        with open(path) as f:
+            self.assertEqual(set(json.load(f)["cards"]), set(merged))
+        self.assertFalse(os.path.exists(copy))
+        self.assertFalse(os.path.exists(later_copy))
+        for other, data in kept.items():
+            with open(other) as f:
+                self.assertEqual(f.read(), data)
+
+    def test_deep_progress_is_left_alone(self):
+        path = lawnotes.REVISION_FILE
+        data = '{"cards":' + '{"x":' * 2000 + '0' + '}' * 2001
+        with open(path, "w") as f:
+            f.write(data)
+        self.assertIsNone(lawnotes.read_progress(path, strict=True))
+        with self.assertRaises(OSError):
+            lawnotes.save_progress({"rated": {"box": 1, "at": 40.0}})
+        with open(path) as f:
+            self.assertEqual(f.read(), data)
+
     def test_history_leaves_progress_out(self):
         self.assertIn(".*", lawnotes.HISTORY_EXCLUDE.split("\n"))
         os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
@@ -1728,6 +1766,76 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(cards["Revise/Negligence.md::donoghue v stevenson"]["box"], 1)
         self.assertEqual(cards["Revise/Negligence.md::caparo industries plc v dickman"]["box"], 0)
         self.assertEqual(open(note).read(), BRIEF_NOTE)                  # the note itself is untouched
+
+    def test_deep_revision_progress_warns_at_forty_columns(self):
+        notes_dir = os.path.join(tempfile.mkdtemp(dir=TMP), "notes")
+        os.makedirs(notes_dir)
+        note = os.path.join(notes_dir, "DeepProgress.md")
+        with open(note, "w") as f:
+            f.write("## R v Brown [1994] 1 AC 212\n- **Held:** Consent is no defence.\n")
+        progress = os.path.join(notes_dir, ".revision.json")
+        data = '{"cards":' + '{"x":' * 2000 + '0' + '}' * 2001
+        with open(progress, "w") as f:
+            f.write(data)
+        s = Session(note, env={"LAWNOTES_DIR": notes_dir}, size=(40, 40))
+        try:
+            self.assertIn("This note", s.keys(b"\x1bc", 0.8))
+            self.assertIn("R v Brown", s.keys(b"\r", 0.5))
+            self.assertIn("Good", s.keys(b" ", 0.5))
+            self.assertIn("PROGRESS NOT SAVED", s.keys(b"3", 0.7))
+            self.assertTrue(s.quit())
+        finally:
+            try:
+                os.kill(s.pid, 9)
+            except OSError:
+                pass
+            try:
+                os.waitpid(s.pid, 0)
+            except OSError:
+                pass
+        with open(progress) as f:
+            self.assertEqual(f.read(), data)
+
+    def test_revision_rating_keeps_other_json_files(self):
+        notes_dir = os.path.join(tempfile.mkdtemp(dir=TMP), "notes")
+        os.makedirs(notes_dir)
+        note = os.path.join(notes_dir, "Copies.md")
+        with open(note, "w") as f:
+            f.write("## R v Brown [1994] 1 AC 212\n- **Held:** Consent is no defence.\n")
+        kept = {}
+        for name in (".revision-backup.json", ".revisions.json"):
+            path = os.path.join(notes_dir, name)
+            data = json.dumps({"version": 1, "cards": {name: {"box": 4, "at": 20.0}}})
+            with open(path, "w") as f:
+                f.write(data)
+            kept[path] = data
+        copy = os.path.join(notes_dir, ".revision 2.json")
+        with open(copy, "w") as f:
+            json.dump({"version": 1, "cards": {"copy": {"box": 2, "at": 30.0}}}, f)
+        s = Session(note, env={"LAWNOTES_DIR": notes_dir}, size=(40, 40))
+        try:
+            self.assertIn("This note", s.keys(b"\x1bc", 0.8))
+            self.assertIn("R v Brown", s.keys(b"\r", 0.5))
+            self.assertIn("Good", s.keys(b" ", 0.5))
+            s.keys(b"3", 0.7)
+            self.assertTrue(s.quit())
+        finally:
+            try:
+                os.kill(s.pid, 9)
+            except OSError:
+                pass
+            try:
+                os.waitpid(s.pid, 0)
+            except OSError:
+                pass
+        with open(os.path.join(notes_dir, ".revision.json")) as f:
+            cards = json.load(f)["cards"]
+        self.assertIn("copy", cards)
+        self.assertIn("Copies.md::r v brown", cards)
+        self.assertFalse(os.path.exists(copy))
+        for path, data in kept.items():
+            with open(path) as f:
+                self.assertEqual(f.read(), data)
 
     def test_revision_card_wraps_in_a_narrow_paper_pane(self):
         folder = os.path.join(lawnotes.NOTES_DIR, "Narrow")
