@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TMP = tempfile.mkdtemp(prefix="lawnotes-tests-")
@@ -142,6 +143,91 @@ class BufferTests(unittest.TestCase):
         b.save()
         self.assertTrue(os.path.islink(link))
         self.assertEqual(open(real).read(), "ba\n")
+
+
+class AutocompleteTests(unittest.TestCase):
+    def setUp(self):
+        self.app = lawnotes.App.__new__(lawnotes.App)
+        self.app._cases = (0.0, None, None)
+        self.app.buf = lawnotes.Buffer(os.path.join(TMP, "autocomplete-draft.md"))
+        self.source = os.path.join(TMP, "autocomplete-source.md")
+        self.lines = ["Caparo Industries plc v Dickman [1990] AC 605",
+                      "Caparo Industries plc v Dickman [1990] 2 AC 605",
+                      "Caparo Industries plc v Dickman [1990] 2 AC 605",
+                      "Caparo Manufacturing Ltd v Clark",
+                      "Donoghue v Stevenson [1932] AC 562"]
+        self.stamp = 1
+        self.scans = 0
+        self.app.list_notes = lambda: [(self.stamp, "Source.md", self.source)]
+
+        def all_notes():
+            self.scans += 1
+            return [(self.source, "Source.md", self.lines)]
+
+        self.app.all_notes = all_notes
+
+    def draft(self, text, col=None):
+        self.app.buf.lines = [text]
+        self.app.buf.cy = 0
+        self.app.buf.cx = len(text) if col is None else col
+
+    def test_single_match_citation_and_one_step_undo(self):
+        self.draft("dono")
+        self.assertTrue(self.app.complete_case())
+        self.assertEqual(self.app.buf.lines, ["Donoghue v Stevenson [1932] AC 562"])
+        self.assertTrue(self.app.buf.undo())
+        self.assertEqual(self.app.buf.lines, ["dono"])
+
+    def test_multiple_matches_ranked_citation_frequency_and_cache(self):
+        shown = []
+
+        def pick(title, build, **kwargs):
+            shown.extend(label for label, _ in build(""))
+            return build("")[0][1]
+
+        self.app.pick = pick
+        self.draft("Capa")
+        with patch.object(lawnotes.time, "time", return_value=100):
+            self.assertTrue(self.app.complete_case())
+        self.assertEqual(shown[0], "Caparo Industries plc v Dickman [1990] 2 AC 605")
+        self.assertEqual(self.app.buf.lines[0], shown[0])
+        self.assertEqual(self.scans, 1)
+        self.draft("Dono")
+        with patch.object(lawnotes.time, "time", return_value=101):
+            self.assertTrue(self.app.complete_case())
+        self.assertEqual(self.scans, 1)
+        self.lines.append("Newcastle v United")
+        self.stamp += 1
+        self.draft("New")
+        with patch.object(lawnotes.time, "time", return_value=106):
+            self.assertTrue(self.app.complete_case())
+        self.assertEqual(self.scans, 2)
+
+    def test_tab_contexts_leave_text_untouched(self):
+        for text, col in (("Ca", None), ("CapaX", 4), ("// Capa", None),
+                          ("read // Capa", None), ("`Capa`", 5), ("[[Capa", None),
+                          ("[[Capa]]", 6), ("[^Capa", None), ("[^Capa]", 6),
+                          ("Capa.", None), ("123Capa", None)):
+            with self.subTest(text=text):
+                self.draft(text, col)
+                self.assertFalse(self.app.complete_case())
+                self.assertEqual(self.app.buf.lines, [text])
+        self.assertEqual(self.scans, 0)  # no scan for an excluded context
+
+    def test_picker_shows_at_most_ten_and_name_without_citation(self):
+        self.lines = ["Alpha0 v Beta"] * 3 + [f"Alpha{i} v Beta" for i in range(1, 15)]
+        shown = []
+
+        def pick(title, build, **kwargs):
+            shown.extend(label for label, _ in build(""))
+            return None
+
+        self.app.pick = pick
+        self.draft("Alp")
+        self.assertTrue(self.app.complete_case())
+        self.assertEqual(len(shown), 10)
+        self.assertEqual(shown[0], "Alpha0 v Beta")
+        self.assertEqual(self.app.buf.lines, ["Alp"])
 
 
 class TextTests(unittest.TestCase):
@@ -1543,6 +1629,40 @@ class SessionTests(unittest.TestCase):
         s.keys(b"\x13", 0.4)
         self.assertTrue(s.quit())
         self.assertEqual(open(note).read(), "  - alpha\n  - beta\n\n  - gamma\n- delta\n")
+
+    def test_case_tab_completion_picker_escape_undo_and_fallback(self):
+        root = os.path.join(tempfile.mkdtemp(dir=TMP), "notes")
+        os.makedirs(root)
+        source, draft = os.path.join(root, "Cases.md"), os.path.join(root, "Draft.md")
+        with open(source, "w") as f:
+            f.write("Caparo Industries plc v Dickman [1990] AC 605\n"
+                    "Caparo Industries plc v Dickman [1990] 2 AC 605\n"
+                    "Caparo Industries plc v Dickman [1990] 2 AC 605\n"
+                    "Caparo Manufacturing Ltd v Clark\n"
+                    "Donoghue v Stevenson [1932] AC 562\n")
+        with open(draft, "w") as f:
+            f.write("Dono\nCapa\n// Capa\n- x\n")
+        def saved_lines():
+            with open(draft) as f:
+                return f.read().splitlines()
+
+        s = Session(draft, env={"LAWNOTES_DIR": root}, size=(40, 40))
+        s.keys(b"\x05\t", 0.6)
+        s.keys(b"\x13", 0.4)
+        self.assertEqual(saved_lines()[0], "Donoghue v Stevenson [1932] AC 562")
+        s.keys(b"\x1a\x13", 0.4)
+        self.assertEqual(saved_lines()[0], "Dono")
+        screen = s.keys(b"\x1bOB\x05\t", 0.6)
+        self.assertIn("Complete case", screen)
+        self.assertIn("Caparo Industries", screen)
+        s.keys(b"\x1b\x13", 0.4)
+        self.assertEqual(saved_lines()[1], "Capa")
+        s.keys(b"\t\r\x13", 0.6)
+        self.assertEqual(saved_lines()[1],
+                         "Caparo Industries plc v Dickman [1990] 2 AC 605")
+        s.keys(b"\x1bOB\x05\t\x1bOB\x05\t\x13", 0.6)
+        self.assertTrue(s.quit())
+        self.assertEqual(saved_lines()[2:], ["// Capa    ", "  - x"])
 
     def test_links_between_notes(self):
         folder = os.path.join(lawnotes.NOTES_DIR, "Linked")

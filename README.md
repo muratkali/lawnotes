@@ -5,6 +5,7 @@
 - Highlights case names (*Donoghue v Stevenson*), citations (`[1932] AC 562`) and statutes (`s 2(1)`, *Human Rights Act 1998*).
 - Templates for case briefs, IRAC problem answers, statutes, essay plans and lecture notes.
 - Search across all notes (^P), a case index across all notes (^B), and an outline of the open note (^L).
+- Type the start of a case name (at least three letters) and press Tab to complete its name and most used citation. If several match, choose one; elsewhere Tab still indents or adds spaces.
 - Open to-dos from every note (Option+J or F10); Enter jumps to one, and x ticks it with undo.
 - Check this note for likely OSCOLA slips (Option+K or F9); Enter jumps to one, and f fixes a mechanical slip.
 - Revision cards (Option+C): your case briefs and case bullets become cards to revise, due cards first; progress syncs between Macs.
