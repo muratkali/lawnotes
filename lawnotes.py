@@ -1228,8 +1228,15 @@ def export_markdown(lines, tables=False):
             elif indent == 0:
                 in_list = False
         if not HEADING_RE.match(line):
-            line = CASE_RE.sub(lambda m: m.group() if line[max(0, m.start() - 1):m.start()] in ("*", "_")
-                               else f"*{m.group()}*", line)
+            def italic_case(m):
+                before = line[:m.start()]
+                if before.endswith("**") and not before.endswith("***") and before.count("**") % 2:
+                    return f"*{m.group()}*"  # inside bold, but not already bold italic
+                if before.endswith(("*", "_")):
+                    return m.group()  # the student already italicised this case
+                return f"*{m.group()}*"
+
+            line = CASE_RE.sub(italic_case, line)
         out.append(line)
     if tables:
         title = next((i + 1 for i, line in enumerate(out) if line.startswith("# ")), 0)
@@ -2199,7 +2206,7 @@ HELP = [
     ("^K", "Cut the line (press repeatedly to cut several lines)."),
     ("^U", "Paste the cut lines above the cursor."),
     ("^Z  ^Y", "Undo / redo. Undo also brings back a selection you clicked or moved away from."),
-    ("Option+E", "Export the note to Word (.docx) or PDF, into Downloads. Case names are put in italics (OSCOLA), [^1] footnotes become real footnotes. F5 does the same. For an essay, pick “with tables of cases and legislation”: OSCOLA tables after the title, then a new page. Revision pack: every note in this note's folder, as one document named “Folder revision pack”, with a title page (the folder and the date), a contents list, then each note. With tables, one table of cases and one of legislation cover the whole pack."),
+    ("Option+E", "Export the note to Word (.docx) or PDF, into Downloads. Case names are put in italics (OSCOLA), even inside bold text; [^1] footnotes become real footnotes. F5 does the same. For an essay, pick “with tables of cases and legislation”: OSCOLA tables after the title, then a new page. Revision pack: every note in this note's folder, as one document named “Folder revision pack”, with a title page (the folder and the date), a contents list, then each note. With tables, one table of cases and one of legislation cover the whole pack."),
     ("^R", "Version history: snapshots of your notes are taken automatically every few minutes while you work. Pick one to restore it (^Z undoes the restore)."),
     ("#", "Formatting (Markdown)"),
     ("# Title", "Heading;  ## Section  for a subheading."),

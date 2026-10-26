@@ -899,6 +899,64 @@ class ExportTests(unittest.TestCase):
         self.assertNotIn("SourceCode", doc)                               # indentation isn't code
         self.assertIn("Times New Roman", z.read("word/styles.xml").decode())
 
+    def test_case_emphasis_inside_markdown_formatting(self):
+        import xml.etree.ElementTree as ET
+        import zipfile
+        lines = ["**Donoghue v Stevenson** [1932] AC 562",
+                 "**see Donoghue v Stevenson for this**", "*Donoghue v Stevenson*",
+                 "_Donoghue v Stevenson_", "***Donoghue v Stevenson***",
+                 "==Donoghue v Stevenson==", "[[Cases|Donoghue v Stevenson]]"]
+        expected = ["***Donoghue v Stevenson*** [1932] AC 562",
+                    "**see *Donoghue v Stevenson* for this**", "*Donoghue v Stevenson*",
+                    "_Donoghue v Stevenson_", "***Donoghue v Stevenson***",
+                    "==*Donoghue v Stevenson*==", "*Donoghue v Stevenson*"]
+        self.assertEqual(lawnotes.export_markdown(lines).splitlines(), expected)
+        path = lawnotes.export_note(os.path.join(TMP, "Case emphasis.md"),
+                                    [part for line in lines for part in (line, "")], "docx")
+        with zipfile.ZipFile(path) as z:
+            root = ET.fromstring(z.read("word/document.xml"))
+        w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        paragraphs = [p for p in root.iter(w + "p") if "Donoghue v Stevenson" in
+                      "".join(t.text or "" for t in p.iter(w + "t"))]
+        self.assertEqual(len(paragraphs), len(lines))
+        for i, paragraph in enumerate(paragraphs):
+            runs = [r for r in paragraph.iter(w + "r") if "Donoghue v Stevenson" in
+                    "".join(t.text or "" for t in r.iter(w + "t"))]
+            self.assertEqual(len(runs), 1, lines[i])
+            props = runs[0].find(w + "rPr")
+            self.assertIsNotNone(props, lines[i])
+            self.assertIsNotNone(props.find(w + "i"), lines[i])
+            if i in (0, 1, 4):
+                self.assertIsNotNone(props.find(w + "b"), lines[i])
+            else:
+                self.assertIsNone(props.find(w + "b"), lines[i])
+
+    def test_bold_case_export_key_in_narrow_pane(self):
+        import xml.etree.ElementTree as ET
+        import zipfile
+        note = os.path.join(lawnotes.NOTES_DIR, "Bold export.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        with open(note, "w") as f:
+            f.write("**Donoghue v Stevenson** [1932] AC 562\n")
+        s = Session(note, env={"LAWNOTES_EXPORT_DIR": self.out}, size=(40, 40))
+        self.assertIn("Export this note", s.keys(b"\x1be", 0.6))
+        s.keys(b"\r", 0.6)
+        out = os.path.join(self.out, "Bold export.docx")
+        for _ in range(100):
+            if os.path.exists(out):
+                break
+            s.out += s.read(0.1)
+        self.assertTrue(s.quit())
+        with zipfile.ZipFile(out) as z:
+            root = ET.fromstring(z.read("word/document.xml"))
+        w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        runs = [r for r in root.iter(w + "r") if "Donoghue v Stevenson" in
+                "".join(t.text or "" for t in r.iter(w + "t"))]
+        self.assertEqual(len(runs), 1)
+        props = runs[0].find(w + "rPr")
+        self.assertIsNotNone(props.find(w + "b"))
+        self.assertIsNotNone(props.find(w + "i"))
+
     def test_pdf(self):
         path = lawnotes.export_note(os.path.join(TMP, "Negligence.md"), self.NOTE, "pdf")
         data = open(path, "rb").read()
