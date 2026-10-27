@@ -592,16 +592,19 @@ def word_limit_line(n):
 
 
 def word_limit_at(lines):
-    """(line index, limit) of the first word-limit comment, or (None, None)."""
+    """(line index, limit) of the first word-limit comment, or (None, None).
+
+    The same range the prompt accepts: 1 to 1,000,000. A longer digit string is not a
+    limit (and is not passed to int(), which rejects it on Python 3.11)."""
     for i, line in enumerate(lines):
         m = WORD_LIMIT_RE.match(line)
         if not m:
             continue
-        try:
-            n = int(m.group(1).replace(",", ""))
-        except ValueError:
+        digits = m.group(1).replace(",", "").lstrip("0")
+        if not digits or len(digits) > 7:
             continue
-        if n > 0:
+        n = int(digits)
+        if 1 <= n <= 1000000:
             return i, n
     return None, None
 
@@ -646,7 +649,8 @@ def exam_bar_text(name, message, essential, width, save=""):
     A note such as "10 minutes left" comes before the note's name, which is cut first.
     On the essay bar, `save` ("● unsaved" or "✓ saved") sits between the name and the count,
     and the name is cut before it. A message outranks that save state: the message stays
-    whole, and the save state is dropped before the message is cut."""
+    whole, and the save state is dropped before the message is cut. One space stays before
+    the count. A message that cannot show six characters is left off."""
     if width <= 0:
         return ""
     essential = essential[:width]
@@ -659,55 +663,70 @@ def exam_bar_text(name, message, essential, width, save=""):
             left = left[:room]
         return left.ljust(room) + essential
 
-    def with_save(state):
-        # The count is already reserved. Keep the save state whole, with the same two spaces
-        # the ordinary bar puts between the name and those words, then fit the name in what remains.
-        left_room = room
-        before = after = ""
-        if len(state) > left_room:
-            state = ""
-        else:
-            left_room -= len(state)
-            if left_room >= 2:
-                before, left_room = "  ", left_room - 2
-            elif left_room == 1:
-                before, left_room = " ", left_room - 1
-            if left_room >= 2:
-                after, left_room = "  ", left_room - 2
-            elif left_room == 1:
-                after, left_room = " ", left_room - 1
-        msg, nm = message or "", name or ""
-
-        def form(msg, nm):
-            parts = [p for p in (msg, nm) if p]
-            return (" " + "  ".join(parts)) if parts else ""
-
-        while nm and len(form(msg, nm)) > left_room:
-            nm = nm[:-1]
-        while msg and len(form(msg, nm)) > left_room:
-            msg = msg[:-1]
-        left = form(msg, nm)
-        if len(left) > left_room:
-            left = left[:left_room]
-        pad = " " * (left_room - len(left))
-        return left + before + state + pad + after + essential
-
     if not save:
         return plain()
-    if not message:
-        return with_save(save)
-    shown = with_save(save)
-    head = shown[:len(shown) - len(essential)] if essential else shown
-    if message not in head:  # keeping the save state would cut the message
-        return plain()
-    return shown
+    # Essay bar. One space stays before the count. A message shows whole, or at least
+    # six characters; a shorter fragment is dropped. The name is cut first, and the
+    # save state is dropped before that message is cut.
+    left = essay_bar_left(name, message or "", save, room)
+    return left.ljust(room) + essential
+
+
+def essay_bar_left(name, message, save, room):
+    """The essay bar's left side, at most `room` columns, padded out to `room`.
+
+    A non-empty side ends in a space (two, when the save state is there), so the count
+    never sits against it. The name is cut first. A message is kept whole when it fits;
+    otherwise a prefix of at least six characters, or nothing. The save state is dropped
+    before the message is cut."""
+    if room <= 0:
+        return ""
+    name, message, save = name or "", message or "", save or ""
+
+    def pack(msg, nm, state):
+        parts = [p for p in (msg, nm, state) if p]
+        if not parts:
+            return ""
+        body = " " + "  ".join(parts)
+        # The save state keeps the ordinary bar's two-space gap. Anything else keeps one
+        # space, so a cut name or message never sits against the count.
+        tail = "  " if state else " "
+        if len(body) + len(tail) > room:
+            return None
+        return body + tail
+
+    def place(msg, nm, state):
+        """Fit this exact message: cut the name, then drop the save state."""
+        dropped = False
+        while True:
+            got = pack(msg, nm, state)
+            if got is not None:
+                return got
+            if nm:
+                nm = nm[:-1]
+                continue
+            if state and not dropped:
+                state, nm, dropped = "", name, True
+                continue
+            return None
+
+    shown = place(message, name, save) if message else None
+    if message and shown is None and len(message) > 6:
+        for n in range(len(message) - 1, 5, -1):  # 6 characters is the shortest fragment kept
+            shown = place(message[:n], name, save)
+            if shown is not None:
+                break
+    if not shown:
+        shown = place("", name, save) or ""
+    return shown.ljust(room)
 
 
 def essay_bar_text(name, message, status, dirty, width):
     """Essay status line. The count stays whole on the right.
 
     With no message, ● unsaved or ✓ saved comes next and the name is cut first.
-    A message outranks the save state, which is dropped before the message is cut."""
+    A message outranks the save state. At least one space stays before the count,
+    and a message that cannot show six characters is left off."""
     state = "● unsaved" if dirty else "✓ saved"
     return exam_bar_text(name, message, status, width, state)
 
@@ -3084,8 +3103,9 @@ class App:
     def draw_essay_bar(self, y, x, barw, name, active, b):
         """Status line for a note that carries a word limit.
 
-        The count stays whole. With no message, ● unsaved or ✓ saved comes next and the
-        name is cut first. A message stays whole and the save state is dropped before it.
+        The count stays whole, with a space before it. With no message, ● unsaved or ✓ saved
+        comes next and the name is cut first. A message stays whole and the save state is
+        dropped before it. A message that cannot show six characters is left off.
         Past the limit the count uses the theme's warning colour, the same highlight as a
         misspelt word. A running exam draws its own bar instead of this one."""
         text, count, over = essay_status(b.body_word_count(), b.word_limit(), b.footnote_count())
@@ -4150,6 +4170,7 @@ class App:
                 p.cx, p.anchor = moved_col(b.lines[p.cy], p.cx, find, repl), None
         b.cx = moved_col(b.lines[b.cy], b.cx, find, repl)
         b.lines = lines
+        b.touch()  # checkpoint ran before the text changed; the caches must see these lines
         self.anchor = None
         return n
 
@@ -4235,9 +4256,11 @@ class App:
                 done += line[j:].count(find) + sum(l.count(find) for l in b.lines[i + 1:])
                 b.lines[i] = line[:j] + line[j:].replace(find, repl)
                 b.lines[i + 1:] = [l.replace(find, repl) for l in b.lines[i + 1:]]
+                b.touch()  # one undo step covers every match; each edit still refreshes the caches
                 end = (i, j + len(repl))
                 break
             b.lines[i] = line[:j] + repl + line[j + len(find):]
+            b.touch()
             done += 1
             j += len(repl)
             end = (i, j)
@@ -5070,6 +5093,7 @@ class App:
             self.check_oscola()
         elif key in ("exam", curses.KEY_F8):
             self.exam_mode()
+            keep_selection = self.anchor is not None  # setting or clearing a limit keeps the selection
         elif key == "links":
             self.links()
         elif key == "\x0c":
