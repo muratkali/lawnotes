@@ -2247,6 +2247,72 @@ class ExportSafetyTests(unittest.TestCase):
         with open(first, "rb") as f:
             self.assertEqual(f.read(), b"Other export")
 
+    def test_export_cleanup_ignores_extra_hidden_file(self):
+        def render(path):
+            with open(path, "wb") as f:
+                f.write(b"Exported")
+            with open(os.path.join(os.path.dirname(path), ".DS_Store"), "wb") as f:
+                f.write(b"Finder")
+
+        out, _reason = lawnotes.write_export("Cleanup", "docx", render)
+        with open(out, "rb") as f:
+            self.assertEqual(f.read(), b"Exported")
+        self.assertFalse(any(name.startswith(".lawnotes-") for name in os.listdir(self.out)))
+
+    def test_late_save_keeps_the_original(self):
+        def render(path):
+            with open(path, "wb") as f:
+                f.write(b"ours")
+
+        real_lstat = os.lstat
+        for kind in ("size", "mtime", "inode"):
+            with self.subTest(kind=kind):
+                name = "Late " + kind
+                first, _reason = lawnotes.write_export(name, "docx", render)
+                before = real_lstat(first)
+                changed = False
+
+                def late_stat(path):
+                    nonlocal changed
+                    old = real_lstat(path)
+                    if path == first and not changed:
+                        changed = True
+                        if kind == "inode":
+                            replacement = os.path.join(self.out, "replacement")
+                            with open(replacement, "wb") as f:
+                                f.write(b"edit")
+                            os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+                            os.replace(replacement, first)
+                        else:
+                            with open(first, "wb") as f:
+                                f.write(b"edited" if kind == "size" else b"edit")
+                            if kind == "mtime":
+                                os.utime(first, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+                    return old
+
+                with mock.patch.object(lawnotes.os, "lstat", side_effect=late_stat):
+                    second, reason = lawnotes.write_export(name, "docx", render)
+                self.assertTrue(changed)
+                self.assertEqual(os.path.basename(second), name + " (2).docx")
+                self.assertEqual(reason, name + ".docx changed")
+                with open(first, "rb") as f:
+                    self.assertEqual(f.read(), b"edited" if kind == "size" else b"edit")
+
+    def test_missing_export_files_are_pruned_from_records(self):
+        def render(path):
+            with open(path, "wb") as f:
+                f.write(b"Exported")
+
+        cache = os.path.join(tempfile.mkdtemp(dir=TMP), "cache")
+        with mock.patch.object(lawnotes, "CACHE_DIR", cache):
+            old, _reason = lawnotes.write_export("Old", "docx", render)
+            os.remove(old)
+            new, _reason = lawnotes.write_export("New", "docx", render)
+            with open(lawnotes.export_records_file()) as f:
+                records = json.load(f)
+        self.assertNotIn(old, records)
+        self.assertIn(new, records)
+
     def test_pdf_name_with_converter_stub(self):
         def run(args, **_kwargs):
             if args[0] == "pdf-helper":

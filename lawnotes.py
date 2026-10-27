@@ -1438,12 +1438,20 @@ def write_export(name, fmt, render):
                      and type(saved.get("mtime_ns")) is int)
             if (stat.S_ISREG(old.st_mode) and valid
                     and saved.get("size") == old.st_size and saved.get("mtime_ns") == old.st_mtime_ns):
-                os.replace(tmp, out)
-                break
+                try:
+                    latest = os.lstat(out)
+                except FileNotFoundError:
+                    latest = None
+                if (latest is not None and stat.S_ISREG(latest.st_mode)
+                        and latest.st_size == old.st_size and latest.st_mtime_ns == old.st_mtime_ns
+                        and latest.st_ino == old.st_ino):
+                    os.replace(tmp, out)
+                    break
             if number == 1 and reason is None:
                 reason = (filename + " changed" if valid and stat.S_ISREG(old.st_mode)
                           else "no export record" if stat.S_ISREG(old.st_mode) else "existing file kept")
             number += 1
+        records = {path: saved for path, saved in records.items() if os.path.exists(path)}
         records[out] = {"size": made.st_size, "mtime_ns": made.st_mtime_ns}
         os.makedirs(CACHE_DIR, exist_ok=True)
         fd, record_tmp = tempfile.mkstemp(prefix=".exports-", suffix=".json", dir=CACHE_DIR)
@@ -1456,9 +1464,7 @@ def write_export(name, fmt, render):
                 os.remove(record_tmp)
         return out, reason
     finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        os.rmdir(work)
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def export_document(name, text, fmt, pandoc, pack=False, details=False):
