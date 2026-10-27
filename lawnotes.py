@@ -2176,7 +2176,7 @@ HELP = [
     ("Option+X", "Exam mode for a timed essay or problem question. It asks how many minutes, then a word limit (leave the limit blank for none); Esc cancels either. The status bar shows the time left and the words in the note, or after the end how long since (Time's up). The count is the body only: // comments, footnote lines ([^1]: …) and Markdown markers are left out — headings, bullets, *italic*, **bold**, ==highlights==, `code`, links and [^1] references. The words a link shows are counted. It tells you once at 10 minutes and once at 5. Past the limit the count uses the theme's warning colour. You can keep writing the whole time. Option+X again asks whether to stop. Closing the pane or quitting ends it. F8 does the same."),
     ("#", "Moving around"),
     ("^F", "Find. Press ^F and Enter again (or F3) for the next match; Esc clears the highlight."),
-    ("Option+R", "Find and replace, e.g. Donohue → Donoghue. Type what to replace (it starts as the selected text or your ^F search) and what to put instead, then choose: this note, all notes, or one match at a time (y replace, n skip, a all the rest, Esc stop). Capitals must match exactly. All notes skips read-only notes and lists them; it also lists Finder-locked notes it cannot save. If a note changed elsewhere, a conflict copy is listed for you to merge. The replacements stay highlighted until Esc. ^Z undoes a replace in an open note; other notes are saved in version history first, so ^R can restore them. F4 does the same."),
+    ("Option+R", "Find and replace, e.g. Donohue → Donoghue. Type what to replace (it starts as the selected text or your ^F search) and what to put instead, then choose: this note, all notes, or one match at a time (y replace, n skip, a all the rest, Esc stop). Capitals must match exactly. All notes skips read-only notes and closed links to files outside the notes folder; open an outside link to replace there. It lists Finder-locked notes it cannot save. If a note changed elsewhere, a conflict copy is listed for you to merge. The replacements stay highlighted until Esc. ^Z undoes a replace in an open note; other notes are saved in version history first, so ^R can restore them. F4 does the same."),
     ("^A  ^E", "Start / end of the line."),
     ("Option+↑ ↓", "Top / bottom of the note."),
     ("Option+⌫", "Delete the word before the cursor (Option+Fn+⌫: the word after it)."),
@@ -3931,8 +3931,12 @@ class App:
         backed_up = (not any(buf is None for _, _, buf, _ in notes)
                      or self.history.snapshot(wait=True))  # every note as it was, before anything changes
         panes = {id(b): p for p, b in self.buffers()}
+        real_notes = os.path.realpath(NOTES_DIR) + os.sep
         done, changed, problems = 0, 0, []
         for path, rel, buf, _ in notes:
+            if buf is None and not os.path.realpath(path).startswith(real_notes):
+                problems.append((f"{rel} — linked from outside the notes folder: open it to replace there", path))
+                continue
             if not os.access(path, os.W_OK):
                 problems.append((f"{rel} — read-only: not changed", path))
                 continue

@@ -2186,6 +2186,7 @@ class ReplaceEdgeTests(unittest.TestCase):
             setattr(app, a, getattr(app.pane, a))
         app.buf = lawnotes.Buffer(path)
         app.history = lawnotes.History()
+        app.history.snapshot = lambda wait=False: True  # replace edges do not depend on git timing
         app.search, app.msg, app.msg_until = "", "", 0.0
         app.save_failed, app.last_save_try, app.recovery_path, app.theme = False, 0.0, None, "NERV"
         app.draw = lambda refresh=True: None
@@ -2291,6 +2292,68 @@ class ReplaceEdgeTests(unittest.TestCase):
                 self.assertEqual(f.read(), "DonoghueRO2 [1932] AC 562\n")
         finally:
             os.chmod(a, 0o644)
+
+    def test_closed_outside_link_is_listed_but_inside_link_is_replaced(self):
+        a = self.note("A.md", "No match\n")
+        outside = os.path.join(self.dir, "notes-other", "Outside.md")
+        os.makedirs(os.path.dirname(outside))
+        with open(outside, "wb") as f:
+            f.write(b"Donohue\n")
+        inside = self.note(".targets/Inside.md", "Donohue\n")
+        outside_link = os.path.join(lawnotes.NOTES_DIR, "Tort", "Outside.md")
+        inside_link = os.path.join(lawnotes.NOTES_DIR, "Tort", "Inside.md")
+        os.makedirs(os.path.dirname(outside_link))
+        os.symlink(outside, outside_link)
+        os.symlink(inside, inside_link)
+        app = self.app(a)
+        app.replace_everywhere("Donohue", "Donoghue", app.notes_containing("Donohue"))
+        with open(outside, "rb") as f:
+            self.assertEqual(f.read(), b"Donohue\n")
+        with open(inside, "rb") as f:
+            self.assertEqual(f.read(), b"Donoghue\n")
+        self.assertTrue(os.path.islink(outside_link))
+        self.assertTrue(os.path.islink(inside_link))
+        self.assertEqual(app.msg, "Replaced 1 in 1 note · 1 to check")
+        self.assertEqual(app.picks[0][1], [
+            ("Tort/Outside.md — linked from outside the notes folder: open it to replace there", outside_link)])
+
+    def test_symlinked_notes_folder_still_replaces_closed_note(self):
+        real_notes = os.path.join(self.dir, "real-notes")
+        os.makedirs(real_notes)
+        os.symlink(real_notes, lawnotes.NOTES_DIR)
+        a = self.note("A.md", "No match\n")
+        duty = self.note("Tort/Duty.md", "Donohue\n")
+        app = self.app(a)
+        app.replace_everywhere("Donohue", "Donoghue", app.notes_containing("Donohue"))
+        with open(duty) as f:
+            self.assertEqual(f.read(), "Donoghue\n")
+        self.assertIn("Replaced 1 in 1 note", app.msg)
+        self.assertFalse(app.picks)
+
+    def test_replace_keys_list_outside_link_at_40_columns(self):
+        real_notes = os.path.join(self.dir, "real-notes")
+        os.makedirs(real_notes)
+        os.symlink(real_notes, lawnotes.NOTES_DIR)
+        a = self.note("A.md", "OutsideSpellAL\n")
+        outside = os.path.join(self.dir, "notes-other", "Outside.md")
+        os.makedirs(os.path.dirname(outside))
+        with open(outside, "wb") as f:
+            f.write(b"OutsideSpellAL\n")
+        link = os.path.join(lawnotes.NOTES_DIR, "Tort", "Outside.md")
+        os.makedirs(os.path.dirname(link))
+        os.symlink(outside, link)
+        s = Session(a, env={"LAWNOTES_DIR": lawnotes.NOTES_DIR,
+                            "LAWNOTES_HISTORY": lawnotes.HISTORY_DIR}, size=(40, 40))
+        s.keys(b"\x1br", 0.5)
+        s.keys(b"OutsideSpellAL\rOutsideReplAL\r", 0.8)
+        screen = s.keys(b"\x1b[B\r", 1.5)
+        s.keys(b"\x1b", 0.5)
+        self.assertTrue(s.quit())
+        self.assertIn("Tort/Outside.md — linked from outside", screen)
+        with open(outside, "rb") as f:
+            self.assertEqual(f.read(), b"OutsideSpellAL\n")
+        with open(a) as f:
+            self.assertEqual(f.read(), "OutsideReplAL\n")
 
 
 if __name__ == "__main__":
