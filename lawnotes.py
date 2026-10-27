@@ -34,7 +34,8 @@ Keys (press ^G inside the editor for this list)
   Shift+arrows select   ^C copy   ^X cut   ^V paste (Mac clipboard); click to place the cursor
   ^K cut line    ^U paste lines   ^Z undo          ^Y redo
   ^A / ^E line start / end        Option/Ctrl+arrows move by word
-  Tab / Shift-Tab indent or outdent a bullet
+  Tab completes a case name from your notes, or indents a bullet / adds spaces
+  Shift-Tab outdents a bullet
 """
 import bisect
 import contextlib
@@ -2229,7 +2230,7 @@ HELP = [
     ("#", "Writing"),
     ("Enter", "New line. Continues bullets and numbered lists; Enter on an empty bullet ends the list."),
     ("Shift+Enter", "New line under the same bullet, without a new bullet. Option+Enter does the same."),
-    ("Tab", "Indent a bullet (Shift+Tab to outdent). With lines selected, Tab / Shift+Tab indent / outdent all of them."),
+    ("Tab", "At the end of 3 or more letters starting a case name, complete its name and most used citation. Choose from a list if several match; Esc leaves your text. Otherwise indent a bullet or add four spaces. Shift+Tab outdents. Selected lines indent / outdent together. ^Z undoes a completion."),
     ("^T", "Insert a template: case brief, problem question (IRAC), statute, essay plan, lecture notes."),
     ("^W", "Spelling: on a misspelt word the status bar shows the correction; ^W makes it, ^W again tries the next suggestion, then the full list (add to your dictionary, ignore). Away from one, ^W goes to the next mistake."),
     ("#", "Searching"),
@@ -2345,6 +2346,7 @@ class App:
         self.spell_cycle = None  # after ^W fixed a word: the word, its suggestions and which one is in
         self.queued = []  # keys a menu chose, handled as if typed
         self._links = (0.0, None)  # when the notes were last listed for links, and their link_index
+        self._cases = (0.0, None, None)  # last file check, file stamps, case entries
         self.history = History()
         self.abbreviations = load_abbreviations()
         self.speller = Speller(SPELL_LANG) if SPELL_ON and sys.platform == "darwin" else None
@@ -2528,7 +2530,9 @@ class App:
         except (OSError, ValueError, KeyError, TypeError):
             pass
 
-    def open(self, path):
+    def open(self, path, create=True):
+        if not create and not os.path.isfile(path):
+            return False
         leaving = not (self.buf and os.path.realpath(self.buf.path) == os.path.realpath(path))
         if not self.save_if_dirty():
             self.say("Can't switch notes until this one saves", 8)
@@ -2539,7 +2543,13 @@ class App:
         self.remember_position()
         shared = [b for p, b in self.buffers() if p is not self.pane
                   and os.path.realpath(b.path) == os.path.realpath(path)]
-        self.buf = shared[0] if shared else Buffer(path)  # same note in two panes: one shared text
+        old_buf = self.buf
+        try:
+            self.buf = shared[0] if shared else Buffer(path)  # same note in two panes: one shared text
+        except OSError:
+            if not create:
+                return False
+            raise
         if shared:
             self.buf.cy = self.buf.cx = 0
         self.top = self.top_seg = 0
@@ -2547,6 +2557,9 @@ class App:
         self.search = ""
         self.recovery_path = None
         if not os.path.exists(path):
+            if not create:
+                self.buf = old_buf
+                return False
             title = os.path.splitext(os.path.basename(path))[0].replace("-", " ").replace("_", " ")
             self.buf.lines = [f"# {title}", "", ""]
             self.buf.cy = 2
@@ -2585,6 +2598,7 @@ class App:
         elif theme_ok is None and (self.save_failed or announce):
             self.say("Saved ✓")
         self.save_failed = False
+        self._cases = (0.0, None, None)
         if time.time() - self.history.last >= SNAPSHOT_EVERY:
             self.history.snapshot()
         return True
@@ -2631,6 +2645,7 @@ class App:
             b.cx = min(cx, len(b.lines[b.cy]))
             b.undo_stack.clear()  # undoing past the reload would overwrite the other version
             b.redo_stack.clear()
+            self._cases = (0.0, None, None)
             self.say("This note changed on another Mac or in another app — reloaded", 8)
 
     def check_inbox(self):
@@ -3546,8 +3561,8 @@ class App:
             out.insert(0, (self.buf.path, os.path.basename(self.buf.path), self.buf.lines))
         return out
 
-    def goto(self, path, line, col=0):
-        if os.path.realpath(path) != os.path.realpath(self.buf.path) and not self.open(path):
+    def goto(self, path, line, col=0, create=True):
+        if os.path.realpath(path) != os.path.realpath(self.buf.path) and not self.open(path, create=create):
             return
         b = self.buf
         b.cy = min(line, len(b.lines) - 1)
@@ -3680,22 +3695,92 @@ class App:
             path, _, i, _ = choice
             self.goto(path, i)
 
-    def case_index(self):
+    def case_entries(self):
+        """The case index, reused by ^B and Tab. Check file stamps at most every five seconds."""
+        checked, stamps, entries = self._cases
+        now = time.time()
+        open_buffers = {os.path.realpath(b.path): b for _, b in self.buffers()}
+        versions = tuple(sorted((path, b.version) for path, b in open_buffers.items()))
+        if entries is not None and now - checked < 5 and versions == stamps[1]:
+            return entries
+        listed = self.list_notes()
+        fresh = (tuple((path, mtime) for mtime, _, path in listed), versions)
+        if entries is not None and fresh == stamps:
+            self._cases = (now, stamps, entries)
+            return entries
         cases = {}
-        for path, rel, lines in self.all_notes():
+        notes = self.all_notes()
+        seen = {os.path.realpath(path) for path, _, _ in notes}
+        notes += [(b.path, os.path.basename(b.path), b.lines) for path, b in open_buffers.items()
+                  if path not in seen]
+        for path, rel, lines in notes:
+            buf = open_buffers.get(os.path.realpath(path))
+            if buf:
+                lines = buf.lines
             for i, line in enumerate(lines):
                 for m in CASE_RE.finditer(line):
                     name = " ".join(m.group().split())
-                    c = cases.setdefault(name.lower(), {"name": name, "cite": "", "hits": []})
-                    if not c["cite"]:
-                        cm = CITE_RE.match(line, m.end() + len(line[m.end():]) - len(line[m.end():].lstrip(" ,")))
-                        c["cite"] = cm.group() if cm else ""
+                    c = cases.setdefault(name.lower(), {"name": name, "cite": "", "hits": [], "cites": {}})
+                    rest = line[m.end():]
+                    cm = CITE_RE.match(line, m.end() + len(rest) - len(rest.lstrip(" ,*_")))
+                    if cm:
+                        cite = " ".join(cm.group().split())
+                        if not c["cite"]:
+                            c["cite"] = cite
+                        c["cites"][cite] = c["cites"].get(cite, 0) + 1
                     c["hits"].append((path, rel, i, m.start(), len(m.group())))
         entries = []
         for c in sorted(cases.values(), key=lambda c: c["name"].lower()):
+            c["best_cite"] = max(c["cites"], key=c["cites"].get) if c["cites"] else ""
             notes = len({h[1] for h in c["hits"]})
             label = f"{c['name']} {c['cite']}".strip() + f"   · {notes} note{'s' * (notes != 1)}"
             entries.append((label, c))
+        self._cases = (now, fresh, entries)
+        return entries
+
+    def complete_case(self):
+        """Complete a first party's name at the end of a word; leave other Tabs alone."""
+        b = self.buf
+        line, col = b.lines[b.cy], b.cx
+        if line[col:].strip():
+            return False
+        before = line[:col]
+        word = re.search(r"(?<![\w'’\-])([^\W\d_]+(?:['’\-][^\W\d_]+)*)$", before)
+        if not word or sum(c.isalpha() for c in word.group()) < 3:
+            return False
+        if not re.match(_STOP, word.group().capitalize()) or word.group().lower() in (
+                "for", "not", "with", "was", "are", "has", "its", "his", "her", "who", "any", "all", "may", "can"):
+            return False
+        comment = COMMENT_RE.search(line)
+        if comment and comment.start() < col:
+            return False
+        if before.count("`") % 2 or before.rfind("[[") > before.rfind("]]"):
+            return False
+        if before.rfind("[^") > before.rfind("]"):
+            return False
+        prefix = word.group().lower().replace("’", "'")
+        matches = [c for _, c in self.case_entries()
+                   if c["name"].lower().replace("’", "'").startswith(prefix)]
+        if not matches:
+            return False
+        matches.sort(key=lambda c: (-len(c["hits"]), c["name"].lower()))
+        if len(matches) > 1:
+            choice = self.pick("Complete case", lambda q: [
+                (f"{c['name']} {c['best_cite']}".strip(), c) for c in matches
+                if q.lower() in (c["name"] + " " + c["best_cite"]).lower()][:10],
+                guide="Enter completes · Esc leaves the text")
+            if not choice:
+                return True
+        else:
+            choice = matches[0]
+        full = f"{choice['name']} {choice['best_cite']}".strip()
+        b.checkpoint("case")
+        b.lines[b.cy] = line[:word.start()] + full + line[col:]
+        b.cx = word.start() + len(full)
+        return True
+
+    def case_index(self):
+        entries = self.case_entries()
 
         def build(query):
             words = query.lower().split()
@@ -3705,10 +3790,17 @@ class App:
                       "No cases found yet. Case names like  Donoghue v Stevenson  are picked up automatically.")
         if not c:
             return
-        hits = c["hits"]
+        open_lines = {os.path.realpath(b.path): b.lines for _, b in self.buffers()}
+        lines_by_path = {p: open_lines.get(os.path.realpath(p), l) for p, _, l in self.all_notes()}
+        for _, b in self.buffers():
+            lines_by_path.setdefault(b.path, b.lines)
+        hits = [h for h in c["hits"] if os.path.isfile(h[0]) and h[0] in lines_by_path
+                and 0 <= h[2] < len(lines_by_path[h[0]])]
+        if not hits:
+            self.say("This case is no longer in the notes")
+            return
         if len(hits) > 1:
-            lines_by_path = {p: l for p, _, l in self.all_notes()}
-            items = [(f"{rel}:{i + 1}   {self.snippet(lines_by_path.get(path, [''] * (i + 1))[i], j, n)}", h)
+            items = [(f"{rel}:{i + 1}   {self.snippet(lines_by_path[path][i], j, n)}", h)
                      for h in hits for path, rel, i, j, n in [h]]
             hit = self.pick(f"{c['name']} — where it's mentioned", lambda q: [
                 it for it in items if q.lower() in it[0].lower()])
@@ -3717,7 +3809,10 @@ class App:
         else:
             hit = hits[0]
         path, _, i, j, _ = hit
-        self.goto(path, i, j)
+        if not os.path.isfile(path):
+            self.say("This note is no longer there")
+            return
+        self.goto(path, i, j, create=False)
 
     def revise(self):
         """Option+C / F7: revision cards from the case briefs and case bullets in this note, its
@@ -4077,6 +4172,7 @@ class App:
             changed += n > 0
         if done:
             self.search = repl  # the replacements are highlighted; Esc clears
+            self._cases = (0.0, None, None)
         summary = f"Replaced {done:,} in {changed} note{'s' * (changed != 1)}"
         self.say(summary + " · ^Z undoes it in an open note; ^R restores an earlier version of the others", 10)
         if problems:
@@ -4890,7 +4986,9 @@ class App:
         elif key == curses.KEY_DC or key == "\x04":
             b.delete()
         elif key == "\t":
-            if BULLET_RE.match(b.lines[b.cy]):
+            if self.complete_case():
+                pass
+            elif BULLET_RE.match(b.lines[b.cy]):
                 b.indent()
             else:
                 b.insert("    ", kind="tab")
