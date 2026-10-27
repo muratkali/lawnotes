@@ -15,7 +15,7 @@
 - British English spell check using the Mac's own dictionary, which knows legal Latin.
 - Saves as you type, never overwrites a note changed on another Mac, and keeps version history (^R).
 
-- Export to Word or PDF (Option+E): case names in italics (OSCOLA), footnotes as real footnotes.
+- Export to Word or PDF (Option+E): case names in italics (OSCOLA), even inside bold text, and footnotes as real footnotes.
 - Revision pack (Option+E): every note in the current folder as one Word or PDF document, with a title page and contents.
 - Highlight text (select it, press `=`): exported to Word as a yellow highlight.
 - Paste tables from Word: they become Markdown tables, and export back to Word as real tables.
