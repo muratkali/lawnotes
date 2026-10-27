@@ -9,12 +9,15 @@ import os
 import pty
 import re
 import select
+import stat
 import struct
 import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TMP = tempfile.mkdtemp(prefix="lawnotes-tests-")
@@ -830,7 +833,7 @@ class ReplaceTests(unittest.TestCase):
             self.assertEqual(open(p).read(), text, p)
         self.assertIn("Replaced 6 in 3 notes", app.msg)
         title, problems = app.picks[0]
-        self.assertIn("1 couldn't be written", title)
+        self.assertIn("1 to check", title)
         self.assertEqual([path for _, path in problems], [d])
         self.assertTrue(problems[0][0].startswith("ro/D.md — not changed"))
         right.buf.undo()                                             # ^Z in an open note
@@ -865,7 +868,6 @@ class ReplaceTests(unittest.TestCase):
         self.assertEqual(open(a).read(), "Donoghue\n")              # the open note: ^Z undoes it
         self.assertEqual(open(c).read(), "Donohue\n")
         self.assertIn("version history isn't working", app.picks[0][1][0][0])
-
 
 @unittest.skipUnless(lawnotes.find_tool("pandoc"), "export needs pandoc (brew install pandoc)")
 class ExportTests(unittest.TestCase):
@@ -2156,6 +2158,281 @@ class RevisionPackTests(unittest.TestCase):
         self.assertNotIn("NOTINPACK", doc)
         self.assertIn("UNSAVEDWORD", open(offer).read())          # the open note was saved
         self.assertIn("HIDEME", open(older).read())               # the note itself is left alone
+
+
+class ReplaceEdgeTests(unittest.TestCase):
+    """Replace-all permission and conflict handling in an isolated notes folder."""
+
+    def setUp(self):
+        self.saved = lawnotes.NOTES_DIR, lawnotes.HISTORY_DIR
+        self.dir = tempfile.mkdtemp(dir=TMP)
+        lawnotes.NOTES_DIR = os.path.join(self.dir, "notes")
+        lawnotes.HISTORY_DIR = os.path.join(self.dir, "history.git")
+
+    def tearDown(self):
+        lawnotes.NOTES_DIR, lawnotes.HISTORY_DIR = self.saved
+
+    def note(self, rel, text):
+        path = os.path.join(lawnotes.NOTES_DIR, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    def app(self, path):
+        app = object.__new__(lawnotes.App)
+        app.pane = lawnotes.Pane()
+        app.layout = lawnotes.Layout.leaf(app.pane)
+        for a in lawnotes.App.VIEW_ATTRS:
+            setattr(app, a, getattr(app.pane, a))
+        app.buf = lawnotes.Buffer(path)
+        app.history = lawnotes.History()
+        app.history.snapshot = lambda wait=False: True  # replace edges do not depend on git timing
+        app.search, app.msg, app.msg_until = "", "", 0.0
+        app.save_failed, app.last_save_try, app.recovery_path, app.theme = False, 0.0, None, "NERV"
+        app.draw = lambda refresh=True: None
+        app.picks = []
+        app.pick = lambda title, build, *a, **k: app.picks.append((title, build(""))) or None
+        return app
+
+    def test_read_only_open_and_closed_notes_are_skipped(self):
+        a = self.note("A.md", "Donohue\n")
+        closed = self.note("Tort/Duty.md", "Donohue\n")
+        writable = self.note("B.md", "Donohue\n")
+        before = {}
+        for p in (a, closed):
+            with open(p, "rb") as f:
+                before[p] = f.read()
+        app = self.app(a)
+        for p in before:
+            os.chmod(p, 0o444)
+        try:
+            self.assertTrue(all(not os.access(p, os.W_OK) for p in before))
+            app.replace_everywhere("Donohue", "Donoghue", app.notes_containing("Donohue"))
+            self.assertEqual(app.buf.lines, ["Donohue"])
+            self.assertEqual(app.msg, "Replaced 1 in 1 note · 2 to check")
+            self.assertEqual({p for _, p in app.picks[0][1]}, {a, closed})
+            self.assertTrue(all("read-only" in label for label, _ in app.picks[0][1]))
+            for p, data in before.items():
+                with open(p, "rb") as f:
+                    self.assertEqual(f.read(), data)
+            with open(writable) as f:
+                self.assertEqual(f.read(), "Donoghue\n")
+        finally:
+            for p in before:
+                os.chmod(p, 0o644)
+
+    def test_open_note_conflict_copy_is_listed_not_counted(self):
+        a = self.note("A.md", "Donohue\n")
+        c = self.note("Tort/Duty.md", "Donohue\n")
+        app = self.app(a)
+        right = lawnotes.Pane()
+        right.buf = lawnotes.Buffer(c)
+        app.layout = lawnotes.Layout("v", lawnotes.Layout.leaf(app.pane), lawnotes.Layout.leaf(right))
+        notes = app.notes_containing("Donohue")
+        save = lawnotes.Buffer.save
+
+        def change_while_saving(buf):
+            if buf is right.buf:
+                with open(c, "w") as f:
+                    f.write("Changed on another Mac\n")
+                os.utime(c, ns=(buf.disk_mtime + 1000000000,) * 2)
+            return save(buf)
+
+        with mock.patch.object(lawnotes.Buffer, "save", change_while_saving):
+            app.replace_everywhere("Donohue", "Donoghue", notes)
+        with open(c) as f:
+            self.assertEqual(f.read(), "Changed on another Mac\n")
+        self.assertEqual(app.msg, "Replaced 1 in 1 note · 1 to check")
+        label, conflict = app.picks[0][1][0]
+        self.assertTrue(label.startswith("Saved as a conflict copy: Tort/Duty"), label)
+        self.assertEqual(conflict, right.buf.path)
+        self.assertNotEqual(c, conflict)
+        with open(conflict) as f:
+            self.assertEqual(f.read(), "Donoghue\n")
+
+    def test_finder_locked_note_is_listed_if_flags_are_available(self):
+        if not hasattr(os, "chflags") or not hasattr(stat, "UF_IMMUTABLE"):
+            self.skipTest("Finder lock flags are unavailable")
+        a = self.note("A.md", "Donohue\n")
+        locked = self.note("Tort/Duty.md", "Donohue\n")
+        try:
+            os.chflags(locked, stat.UF_IMMUTABLE)
+        except OSError as e:
+            self.skipTest(f"Finder lock flag cannot be set here: {e.strerror or e}")
+        try:
+            self.assertTrue(os.stat(locked).st_flags & stat.UF_IMMUTABLE)
+            app = self.app(a)
+            app.replace_everywhere("Donohue", "Donoghue", app.notes_containing("Donohue"))
+            with open(locked, "rb") as f:
+                self.assertEqual(f.read(), b"Donohue\n")
+            self.assertEqual(app.msg, "Replaced 1 in 1 note · 1 to check")
+            self.assertEqual(app.picks[0][1][0][1], locked)
+        finally:
+            os.chflags(locked, 0)
+
+    def test_replace_keys_skip_read_only_note_at_40_columns(self):
+        a = self.note("ReplaceEdge/A.md", "DonohoeRO2 v Stevenson\n")
+        b = self.note("ReplaceEdge/B.md", "DonohoeRO2 [1932] AC 562\n")
+        with open(a, "rb") as f:
+            before = f.read()
+        os.chmod(a, 0o444)
+        try:
+            s = Session(a, env={"LAWNOTES_DIR": lawnotes.NOTES_DIR,
+                                "LAWNOTES_HISTORY": lawnotes.HISTORY_DIR}, size=(40, 40))
+            s.keys(b"\x1br", 0.5)
+            s.keys(b"DonohoeRO2\rDonoghueRO2\r", 0.8)
+            screen = s.keys(b"\x1b[B\r", 1.5)
+            self.assertIn("Replaced 1 in 1 note", screen)
+            self.assertIn("ReplaceEdge/A.md — read-only", screen)
+            s.keys(b"\x1b", 0.5)
+            self.assertTrue(s.quit())
+            with open(a, "rb") as f:
+                self.assertEqual(f.read(), before)
+            with open(b) as f:
+                self.assertEqual(f.read(), "DonoghueRO2 [1932] AC 562\n")
+        finally:
+            os.chmod(a, 0o644)
+
+    def test_closed_outside_link_is_listed_but_inside_link_is_replaced(self):
+        a = self.note("A.md", "No match\n")
+        outside = os.path.join(self.dir, "notes-other", "Outside.md")
+        os.makedirs(os.path.dirname(outside))
+        with open(outside, "wb") as f:
+            f.write(b"Donohue\n")
+        inside = self.note(".targets/Inside.md", "Donohue\n")
+        outside_link = os.path.join(lawnotes.NOTES_DIR, "Tort", "Outside.md")
+        inside_link = os.path.join(lawnotes.NOTES_DIR, "Tort", "Inside.md")
+        os.makedirs(os.path.dirname(outside_link))
+        os.symlink(outside, outside_link)
+        os.symlink(inside, inside_link)
+        app = self.app(a)
+        app.replace_everywhere("Donohue", "Donoghue", app.notes_containing("Donohue"))
+        with open(outside, "rb") as f:
+            self.assertEqual(f.read(), b"Donohue\n")
+        with open(inside, "rb") as f:
+            self.assertEqual(f.read(), b"Donoghue\n")
+        self.assertTrue(os.path.islink(outside_link))
+        self.assertTrue(os.path.islink(inside_link))
+        self.assertEqual(app.msg, "Replaced 1 in 1 note · 1 to check")
+        self.assertEqual(app.picks[0][1], [
+            ("Tort/Outside.md — linked from outside the notes folder: open it to replace there", outside_link)])
+
+    def test_symlinked_notes_folder_still_replaces_closed_note(self):
+        real_notes = os.path.join(self.dir, "real-notes")
+        os.makedirs(real_notes)
+        os.symlink(real_notes, lawnotes.NOTES_DIR)
+        a = self.note("A.md", "No match\n")
+        duty = self.note("Tort/Duty.md", "Donohue\n")
+        app = self.app(a)
+        app.replace_everywhere("Donohue", "Donoghue", app.notes_containing("Donohue"))
+        with open(duty) as f:
+            self.assertEqual(f.read(), "Donoghue\n")
+        self.assertIn("Replaced 1 in 1 note", app.msg)
+        self.assertFalse(app.picks)
+
+    def test_replace_keys_list_outside_link_at_40_columns(self):
+        real_notes = os.path.join(self.dir, "real-notes")
+        os.makedirs(real_notes)
+        os.symlink(real_notes, lawnotes.NOTES_DIR)
+        a = self.note("A.md", "OutsideSpellAL\n")
+        outside = os.path.join(self.dir, "notes-other", "Outside.md")
+        os.makedirs(os.path.dirname(outside))
+        with open(outside, "wb") as f:
+            f.write(b"OutsideSpellAL\n")
+        link = os.path.join(lawnotes.NOTES_DIR, "Tort", "Outside.md")
+        os.makedirs(os.path.dirname(link))
+        os.symlink(outside, link)
+        s = Session(a, env={"LAWNOTES_DIR": lawnotes.NOTES_DIR,
+                            "LAWNOTES_HISTORY": lawnotes.HISTORY_DIR}, size=(40, 40))
+        s.keys(b"\x1br", 0.5)
+        s.keys(b"OutsideSpellAL\rOutsideReplAL\r", 0.8)
+        screen = s.keys(b"\x1b[B\r", 1.5)
+        s.keys(b"\x1b", 0.5)
+        self.assertTrue(s.quit())
+        self.assertIn("Tort/Outside.md — linked from outside", screen)
+        with open(outside, "rb") as f:
+            self.assertEqual(f.read(), b"OutsideSpellAL\n")
+        with open(a) as f:
+            self.assertEqual(f.read(), "OutsideReplAL\n")
+
+    def test_mis_cased_inside_links_replace_once(self):
+        lawnotes.NOTES_DIR = os.path.join(self.dir, "MyNotes")
+        a = self.note("A.md", "No match\n")
+        inside = self.note(".targets/Inside.md", "Don\n")
+        exact = os.path.join(lawnotes.NOTES_DIR, "Tort", "AExact.md")
+        alias = os.path.join(lawnotes.NOTES_DIR, "Tort", "ZCase.md")
+        os.makedirs(os.path.dirname(exact))
+        os.symlink(inside, exact)
+        os.symlink(inside.replace("MyNotes", "mynotes"), alias)
+        try:
+            available = os.path.samefile(alias, inside)
+        except OSError:
+            available = False
+        if not available:
+            self.skipTest("filesystem does not resolve differently cased paths")
+        app = self.app(a)
+        notes = app.notes_containing("Don")
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0][0], alias)
+        app.replace_everywhere("Don", "DonDon", notes)
+        with open(inside) as f:
+            self.assertEqual(f.read(), "DonDon\n")
+        self.assertIn("Replaced 1 in 1 note", app.msg)
+        self.assertFalse(app.picks)
+
+    def test_unicode_spelling_inside_links_replace_once(self):
+        lawnotes.NOTES_DIR = os.path.join(self.dir, "Café")
+        a = self.note("A.md", "No match\n")
+        inside = self.note(".targets/Inside.md", "Don\n")
+        exact = os.path.join(lawnotes.NOTES_DIR, "Tort", "AExact.md")
+        alias = os.path.join(lawnotes.NOTES_DIR, "Tort", "ZUnicode.md")
+        os.makedirs(os.path.dirname(exact))
+        os.symlink(inside, exact)
+        os.symlink(unicodedata.normalize("NFD", inside), alias)
+        try:
+            available = os.path.samefile(alias, inside)
+        except OSError:
+            available = False
+        if not available:
+            self.skipTest("filesystem does not resolve NFC and NFD paths as one file")
+        app = self.app(a)
+        notes = app.notes_containing("Don")
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0][0], alias)
+        app.replace_everywhere("Don", "DonDon", notes)
+        with open(inside) as f:
+            self.assertEqual(f.read(), "DonDon\n")
+        self.assertFalse(app.picks)
+
+    def test_hard_links_are_one_note_for_replace(self):
+        a = self.note("A.md", "No match\n")
+        first = self.note("Tort/A.md", "Don\n")
+        os.link(first, os.path.join(lawnotes.NOTES_DIR, "Tort", "B.md"))
+        self.assertEqual(len(self.app(a).notes_containing("Don")), 1)
+
+    def test_replace_keys_accept_mis_cased_inside_link_at_40_columns(self):
+        lawnotes.NOTES_DIR = os.path.join(self.dir, "MyNotes")
+        a = self.note("A.md", "No match\n")
+        inside = self.note(".targets/Inside.md", "CaseSpellALI185\n")
+        link = os.path.join(lawnotes.NOTES_DIR, "Tort", "Case.md")
+        os.makedirs(os.path.dirname(link))
+        os.symlink(inside.replace("MyNotes", "mynotes"), link)
+        try:
+            available = os.path.samefile(link, inside)
+        except OSError:
+            available = False
+        if not available:
+            self.skipTest("filesystem does not resolve differently cased paths")
+        s = Session(a, env={"LAWNOTES_DIR": lawnotes.NOTES_DIR,
+                            "LAWNOTES_HISTORY": lawnotes.HISTORY_DIR}, size=(40, 40))
+        s.keys(b"\x1br", 0.5)
+        s.keys(b"CaseSpellALI185\rCaseReplaceALI185\r", 0.8)
+        screen = s.keys(b"\r", 1.5)
+        self.assertTrue(s.quit())
+        self.assertIn("Replaced 1 in 1 note", screen)
+        with open(inside) as f:
+            self.assertEqual(f.read(), "CaseReplaceALI185\n")
 
 
 if __name__ == "__main__":

@@ -2176,7 +2176,7 @@ HELP = [
     ("Option+X", "Exam mode for a timed essay or problem question. It asks how many minutes, then a word limit (leave the limit blank for none); Esc cancels either. The status bar shows the time left and the words in the note, or after the end how long since (Time's up). The count is the body only: // comments, footnote lines ([^1]: …) and Markdown markers are left out — headings, bullets, *italic*, **bold**, ==highlights==, `code`, links and [^1] references. The words a link shows are counted. It tells you once at 10 minutes and once at 5. Past the limit the count uses the theme's warning colour. You can keep writing the whole time. Option+X again asks whether to stop. Closing the pane or quitting ends it. F8 does the same."),
     ("#", "Moving around"),
     ("^F", "Find. Press ^F and Enter again (or F3) for the next match; Esc clears the highlight."),
-    ("Option+R", "Find and replace, e.g. Donohue → Donoghue. Type what to replace (it starts as the selected text or your ^F search) and what to put instead, then choose: this note, all notes, or one match at a time (y replace, n skip, a all the rest, Esc stop). Capitals must match exactly. The replacements stay highlighted until Esc. ^Z undoes a replace in an open note; other notes are saved in version history first, so ^R can restore them. F4 does the same."),
+    ("Option+R", "Find and replace, e.g. Donohue → Donoghue. Type what to replace (it starts as the selected text or your ^F search) and what to put instead, then choose: this note, all notes, or one match at a time (y replace, n skip, a all the rest, Esc stop). Capitals must match exactly. All notes skips read-only notes and closed links to files outside the notes folder; open an outside link to replace there. Links to the same file are replaced once, even if spelled differently. It lists Finder-locked notes it cannot save. If a note changed elsewhere, a conflict copy is listed for you to merge. The replacements stay highlighted until Esc. ^Z undoes a replace in an open note; other notes are saved in version history first, so ^R can restore them. F4 does the same."),
     ("^A  ^E", "Start / end of the line."),
     ("Option+↑ ↓", "Top / bottom of the note."),
     ("Option+⌫", "Delete the word before the cursor (Option+Fn+⌫: the word after it)."),
@@ -3890,16 +3890,26 @@ class App:
     def notes_containing(self, find):
         """(path, name, buffer if open in a pane, matches) for each note with `find` in it. Notes open
         in a pane are read from there, unsaved changes included. Only .md / .txt notes, never hidden files."""
-        open_bufs = {os.path.realpath(b.path): b for _, b in self.buffers()}
+        open_bufs = {}
+        for _, b in self.buffers():
+            try:
+                st = os.stat(b.path)
+            except OSError:
+                continue
+            open_bufs[st.st_dev, st.st_ino] = b
         out, seen = [], set()
         for _, rel, path in self.list_notes():
             real = os.path.realpath(path)
             name = os.path.basename(real)
-            if real in seen or name.startswith(".") or not name.endswith(NOTE_EXTS):  # links too
+            if name.startswith(".") or not name.endswith(NOTE_EXTS):  # links too
                 continue
-            seen.add(real)
-            buf = open_bufs.get(real)
             try:
+                st = os.stat(path)
+                key = st.st_dev, st.st_ino
+                if key in seen:
+                    continue
+                seen.add(key)
+                buf = open_bufs.get(key)
                 lines = buf.lines if buf is not None else Buffer(path).lines
             except OSError:
                 continue
@@ -3931,14 +3941,40 @@ class App:
         backed_up = (not any(buf is None for _, _, buf, _ in notes)
                      or self.history.snapshot(wait=True))  # every note as it was, before anything changes
         panes = {id(b): p for p, b in self.buffers()}
+        real_notes = os.path.realpath(NOTES_DIR)
         done, changed, problems = 0, 0, []
         for path, rel, buf, _ in notes:
+            if buf is None:
+                folder = os.path.dirname(os.path.realpath(path))
+                inside = False
+                while True:
+                    try:
+                        if os.path.samefile(folder, real_notes):
+                            inside = True
+                            break
+                    except OSError:
+                        pass
+                    parent = os.path.dirname(folder)
+                    if parent == folder:
+                        break
+                    folder = parent
+                if not inside:
+                    problems.append((f"{rel} — linked from outside the notes folder: open it to replace there", path))
+                    continue
+            if not os.access(path, os.W_OK):
+                problems.append((f"{rel} — read-only: not changed", path))
+                continue
             if buf is not None:
                 with self.viewing(panes[id(buf)]):
                     n = self.replace_in_view(find, repl)
                     saved = self.save_if_dirty()
                 if not saved:
                     problems.append((f"{rel} — couldn't be saved; the change is in its pane, not saved yet", path))
+                    continue
+                if os.path.realpath(buf.path) != os.path.realpath(path):
+                    problems.append((f"Saved as a conflict copy: {rel} — merge “{os.path.basename(buf.path)}”",
+                                     buf.path))
+                    continue
             else:
                 if not backed_up:
                     problems.append((f"{rel} — not changed: version history isn't working, so it couldn't "
@@ -3967,11 +4003,11 @@ class App:
         summary = f"Replaced {done:,} in {changed} note{'s' * (changed != 1)}"
         self.say(summary + " · ^Z undoes it in an open note; ^R restores an earlier version of the others", 10)
         if problems:
-            path = self.pick(f"{summary} — {len(problems)} couldn't be written (Enter opens one)",
+            path = self.pick(f"{summary} — {len(problems)} to check (Enter opens one)",
                              lambda q: [it for it in problems if q.lower() in it[0].lower()])
             if path:
                 self.goto(path, 0)
-            self.say(f"{summary} · {len(problems)} couldn't be written", 10)
+            self.say(f"{summary} · {len(problems)} to check", 10)
 
     def replace_review(self, find, repl, instead):
         """One match at a time in this note: y replaces it, n skips it, a replaces it and all the rest,
