@@ -1767,34 +1767,40 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(cards["Revise/Negligence.md::caparo industries plc v dickman"]["box"], 0)
         self.assertEqual(open(note).read(), BRIEF_NOTE)                  # the note itself is untouched
 
-    def test_deep_revision_progress_warns_at_forty_columns(self):
-        notes_dir = os.path.join(tempfile.mkdtemp(dir=TMP), "notes")
-        os.makedirs(notes_dir)
-        note = os.path.join(notes_dir, "DeepProgress.md")
-        with open(note, "w") as f:
-            f.write("## R v Brown [1994] 1 AC 212\n- **Held:** Consent is no defence.\n")
-        progress = os.path.join(notes_dir, ".revision.json")
-        data = '{"cards":' + '{"x":' * 2000 + '0' + '}' * 2001
-        with open(progress, "w") as f:
-            f.write(data)
-        s = Session(note, env={"LAWNOTES_DIR": notes_dir}, size=(40, 40))
-        try:
-            self.assertIn("This note", s.keys(b"\x1bc", 0.8))
-            self.assertIn("R v Brown", s.keys(b"\r", 0.5))
-            self.assertIn("Good", s.keys(b" ", 0.5))
-            self.assertIn("PROGRESS NOT SAVED", s.keys(b"3", 0.7))
-            self.assertTrue(s.quit())
-        finally:
-            try:
-                os.kill(s.pid, 9)
-            except OSError:
-                pass
-            try:
-                os.waitpid(s.pid, 0)
-            except OSError:
-                pass
-        with open(progress) as f:
-            self.assertEqual(f.read(), data)
+    def test_deep_revision_progress_warns_at_each_width(self):
+        messages = ((100, "Revised 1 card: 0 good, 0 hard, 1 again · 1 left · PROGRESS NOT SAVED"),
+                    (40, "PROGRESS NOT SAVED; file left alone"),
+                    (30, "PROGRESS NOT SAVED"))
+        for width, expected in messages:
+            with self.subTest(width=width):
+                notes_dir = os.path.join(tempfile.mkdtemp(dir=TMP), "notes")
+                os.makedirs(notes_dir)
+                note = os.path.join(notes_dir, "DeepProgress.md")
+                with open(note, "w") as f:
+                    f.write("## R v Brown [1994] 1 AC 212\n- **Held:** Consent is no defence.\n")
+                progress = os.path.join(notes_dir, ".revision.json")
+                data = '{"cards":' + '{"x":' * 2000 + '0' + '}' * 2001
+                with open(progress, "w") as f:
+                    f.write(data)
+                s = Session(note, env={"LAWNOTES_DIR": notes_dir}, size=(40, width))
+                try:
+                    self.assertIn("This note", s.keys(b"\x1bc", 0.8))
+                    self.assertIn("R v Brown", s.keys(b"\r", 0.5))
+                    self.assertIn("Good", s.keys(b" ", 0.5))
+                    s.keys(b"1", 0.5)
+                    self.assertIn(expected, s.keys(b"\x1b", 0.7))
+                    self.assertTrue(s.quit())
+                finally:
+                    try:
+                        os.kill(s.pid, 9)
+                    except OSError:
+                        pass
+                    try:
+                        os.waitpid(s.pid, 0)
+                    except OSError:
+                        pass
+                with open(progress) as f:
+                    self.assertEqual(f.read(), data)
 
     def test_revision_rating_keeps_other_json_files(self):
         notes_dir = os.path.join(tempfile.mkdtemp(dir=TMP), "notes")

@@ -3724,7 +3724,17 @@ class App:
         if queue:
             msg += f" · {len(queue)} left"
         if failed:
-            msg = "PROGRESS NOT SAVED; file left alone"
+            _, left_x, _, width = self.pane.rect
+            screen_width = self.scr.getmaxyx()[1]
+            barw = width - (1 if left_x + width >= screen_width else 0)
+            full = msg + " · PROGRESS NOT SAVED"
+            short = "PROGRESS NOT SAVED; file left alone"
+            if len(full) + 1 <= barw:
+                msg = full
+            elif len(short) + 1 <= barw:
+                msg = short
+            else:
+                msg = "PROGRESS NOT SAVED"
         self.say(msg, 12)
 
     def draw_card(self, card, shown, top, where, new):
