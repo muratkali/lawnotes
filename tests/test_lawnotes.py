@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import unittest
 from unittest import mock
 
@@ -2354,6 +2355,84 @@ class ReplaceEdgeTests(unittest.TestCase):
             self.assertEqual(f.read(), b"OutsideSpellAL\n")
         with open(a) as f:
             self.assertEqual(f.read(), "OutsideReplAL\n")
+
+    def test_mis_cased_inside_links_replace_once(self):
+        lawnotes.NOTES_DIR = os.path.join(self.dir, "MyNotes")
+        a = self.note("A.md", "No match\n")
+        inside = self.note(".targets/Inside.md", "Don\n")
+        exact = os.path.join(lawnotes.NOTES_DIR, "Tort", "AExact.md")
+        alias = os.path.join(lawnotes.NOTES_DIR, "Tort", "ZCase.md")
+        os.makedirs(os.path.dirname(exact))
+        os.symlink(inside, exact)
+        os.symlink(inside.replace("MyNotes", "mynotes"), alias)
+        try:
+            available = os.path.samefile(alias, inside)
+        except OSError:
+            available = False
+        if not available:
+            self.skipTest("filesystem does not resolve differently cased paths")
+        app = self.app(a)
+        notes = app.notes_containing("Don")
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0][0], alias)
+        app.replace_everywhere("Don", "DonDon", notes)
+        with open(inside) as f:
+            self.assertEqual(f.read(), "DonDon\n")
+        self.assertIn("Replaced 1 in 1 note", app.msg)
+        self.assertFalse(app.picks)
+
+    def test_unicode_spelling_inside_links_replace_once(self):
+        lawnotes.NOTES_DIR = os.path.join(self.dir, "Café")
+        a = self.note("A.md", "No match\n")
+        inside = self.note(".targets/Inside.md", "Don\n")
+        exact = os.path.join(lawnotes.NOTES_DIR, "Tort", "AExact.md")
+        alias = os.path.join(lawnotes.NOTES_DIR, "Tort", "ZUnicode.md")
+        os.makedirs(os.path.dirname(exact))
+        os.symlink(inside, exact)
+        os.symlink(unicodedata.normalize("NFD", inside), alias)
+        try:
+            available = os.path.samefile(alias, inside)
+        except OSError:
+            available = False
+        if not available:
+            self.skipTest("filesystem does not resolve NFC and NFD paths as one file")
+        app = self.app(a)
+        notes = app.notes_containing("Don")
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0][0], alias)
+        app.replace_everywhere("Don", "DonDon", notes)
+        with open(inside) as f:
+            self.assertEqual(f.read(), "DonDon\n")
+        self.assertFalse(app.picks)
+
+    def test_hard_links_are_one_note_for_replace(self):
+        a = self.note("A.md", "No match\n")
+        first = self.note("Tort/A.md", "Don\n")
+        os.link(first, os.path.join(lawnotes.NOTES_DIR, "Tort", "B.md"))
+        self.assertEqual(len(self.app(a).notes_containing("Don")), 1)
+
+    def test_replace_keys_accept_mis_cased_inside_link_at_40_columns(self):
+        lawnotes.NOTES_DIR = os.path.join(self.dir, "MyNotes")
+        a = self.note("A.md", "No match\n")
+        inside = self.note(".targets/Inside.md", "CaseSpellALI185\n")
+        link = os.path.join(lawnotes.NOTES_DIR, "Tort", "Case.md")
+        os.makedirs(os.path.dirname(link))
+        os.symlink(inside.replace("MyNotes", "mynotes"), link)
+        try:
+            available = os.path.samefile(link, inside)
+        except OSError:
+            available = False
+        if not available:
+            self.skipTest("filesystem does not resolve differently cased paths")
+        s = Session(a, env={"LAWNOTES_DIR": lawnotes.NOTES_DIR,
+                            "LAWNOTES_HISTORY": lawnotes.HISTORY_DIR}, size=(40, 40))
+        s.keys(b"\x1br", 0.5)
+        s.keys(b"CaseSpellALI185\rCaseReplaceALI185\r", 0.8)
+        screen = s.keys(b"\r", 1.5)
+        self.assertTrue(s.quit())
+        self.assertIn("Replaced 1 in 1 note", screen)
+        with open(inside) as f:
+            self.assertEqual(f.read(), "CaseReplaceALI185\n")
 
 
 if __name__ == "__main__":
