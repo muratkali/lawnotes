@@ -1230,13 +1230,18 @@ def export_markdown(lines, tables=False):
         if not HEADING_RE.match(line):
             def italic_case(m):
                 before = line[:m.start()]
-                if before.endswith("**") and not before.endswith("***") and before.count("**") % 2:
-                    return f"*{m.group()}*"  # inside bold, but not already bold italic
+                name = line[m.start():m.end()]
+                for marker, other in (("*", "_"), ("_", "*")):
+                    if (before.endswith(marker * 2) and not before.endswith(marker * 3)
+                            and before.count(marker * 2) % 2 and not before.count(other) % 2):
+                        return f"{marker}{name}{marker}"  # bold, but not already italic
                 if before.endswith(("*", "_")):
-                    return m.group()  # the student already italicised this case
-                return f"*{m.group()}*"
+                    return name  # the student already italicised this case
+                return f"*{name}*"
 
-            line = CASE_RE.sub(italic_case, line)
+            # Underscores are Markdown markers here, though CASE_RE treats them as word letters.
+            for m in reversed(list(CASE_RE.finditer(line.replace("_", " ")))):
+                line = line[:m.start()] + italic_case(m) + line[m.end():]
         out.append(line)
     if tables:
         title = next((i + 1 for i, line in enumerate(out) if line.startswith("# ")), 0)

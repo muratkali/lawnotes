@@ -905,12 +905,19 @@ class ExportTests(unittest.TestCase):
         lines = ["**Donoghue v Stevenson** [1932] AC 562",
                  "**see Donoghue v Stevenson for this**", "*Donoghue v Stevenson*",
                  "_Donoghue v Stevenson_", "***Donoghue v Stevenson***",
-                 "==Donoghue v Stevenson==", "[[Cases|Donoghue v Stevenson]]"]
+                 "==Donoghue v Stevenson==", "[[Cases|Donoghue v Stevenson]]",
+                 "__Donoghue v Stevenson__", "_**Donoghue v Stevenson**_",
+                 "**_Donoghue v Stevenson_**"]
         expected = ["***Donoghue v Stevenson*** [1932] AC 562",
                     "**see *Donoghue v Stevenson* for this**", "*Donoghue v Stevenson*",
                     "_Donoghue v Stevenson_", "***Donoghue v Stevenson***",
-                    "==*Donoghue v Stevenson*==", "*Donoghue v Stevenson*"]
+                    "==*Donoghue v Stevenson*==", "*Donoghue v Stevenson*",
+                    "___Donoghue v Stevenson___", "_**Donoghue v Stevenson**_",
+                    "**_Donoghue v Stevenson_**"]
         self.assertEqual(lawnotes.export_markdown(lines).splitlines(), expected)
+        html = subprocess.run([lawnotes.find_tool("pandoc"), "-f", "markdown", "-t", "html5"],
+                              input=expected[7], capture_output=True, text=True, check=True).stdout
+        self.assertIn("<strong><em>Donoghue v Stevenson</em></strong>", html)
         path = lawnotes.export_note(os.path.join(TMP, "Case emphasis.md"),
                                     [part for line in lines for part in (line, "")], "docx")
         with zipfile.ZipFile(path) as z:
@@ -926,7 +933,7 @@ class ExportTests(unittest.TestCase):
             props = runs[0].find(w + "rPr")
             self.assertIsNotNone(props, lines[i])
             self.assertIsNotNone(props.find(w + "i"), lines[i])
-            if i in (0, 1, 4):
+            if i in (0, 1, 4, 7, 8, 9):
                 self.assertIsNotNone(props.find(w + "b"), lines[i])
             else:
                 self.assertIsNone(props.find(w + "b"), lines[i])
@@ -937,7 +944,8 @@ class ExportTests(unittest.TestCase):
         note = os.path.join(lawnotes.NOTES_DIR, "Bold export.md")
         os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
         with open(note, "w") as f:
-            f.write("**Donoghue v Stevenson** [1932] AC 562\n")
+            f.write("**Donoghue v Stevenson** [1932] AC 562\n\n"
+                    "__Donoghue v Stevenson__\n")
         s = Session(note, env={"LAWNOTES_EXPORT_DIR": self.out}, size=(40, 40))
         self.assertIn("Export this note", s.keys(b"\x1be", 0.6))
         s.keys(b"\r", 0.6)
@@ -952,10 +960,11 @@ class ExportTests(unittest.TestCase):
         w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
         runs = [r for r in root.iter(w + "r") if "Donoghue v Stevenson" in
                 "".join(t.text or "" for t in r.iter(w + "t"))]
-        self.assertEqual(len(runs), 1)
-        props = runs[0].find(w + "rPr")
-        self.assertIsNotNone(props.find(w + "b"))
-        self.assertIsNotNone(props.find(w + "i"))
+        self.assertEqual(len(runs), 2)
+        for run in runs:
+            props = run.find(w + "rPr")
+            self.assertIsNotNone(props.find(w + "b"))
+            self.assertIsNotNone(props.find(w + "i"))
 
     def test_pdf(self):
         path = lawnotes.export_note(os.path.join(TMP, "Negligence.md"), self.NOTE, "pdf")
