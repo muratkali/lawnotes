@@ -2435,5 +2435,241 @@ class ReplaceEdgeTests(unittest.TestCase):
             self.assertEqual(f.read(), "CaseReplaceALI185\n")
 
 
+@unittest.skipUnless(lawnotes.find_tool("pandoc"), "export needs pandoc (brew install pandoc)")
+class ExportSafetyTests(unittest.TestCase):
+    def setUp(self):
+        self.out = tempfile.mkdtemp(dir=TMP)
+        self.previous_export = lawnotes.EXPORT_DIR
+        lawnotes.EXPORT_DIR = self.out
+
+    def tearDown(self):
+        lawnotes.EXPORT_DIR = self.previous_export
+
+    def test_export_replaces_only_its_unchanged_file(self):
+        note = os.path.join(TMP, "Owned export.md")
+        first = lawnotes.export_note(note, ["First"], "docx", tables=True)
+        with open(lawnotes.export_records_file()) as f:
+            saved = json.load(f)[first]
+        self.assertEqual(saved, {"size": os.stat(first).st_size, "mtime_ns": os.stat(first).st_mtime_ns})
+        second = lawnotes.export_note(note, ["Second"], "docx", tables=True)
+        self.assertEqual(first, second)
+        self.assertEqual(os.listdir(self.out), ["Owned export.docx"])
+        with open(first, "wb") as f:
+            f.write(b"Word edits and comments")
+        third, reason = lawnotes.export_note(note, ["Third"], "docx", tables=True, details=True)
+        self.assertEqual(os.path.basename(third), "Owned export (2).docx")
+        self.assertEqual(reason, "Owned export.docx changed")
+        with open(first, "rb") as f:
+            self.assertEqual(f.read(), b"Word edits and comments")
+        self.assertEqual(lawnotes.export_note(note, ["Fourth"], "docx", tables=True), third)
+        self.assertEqual(len(os.listdir(self.out)), 2)
+        with open(third, "wb") as f:
+            f.write(b"More Word edits")
+        fourth = lawnotes.export_note(note, ["Fifth"], "docx")
+        self.assertEqual(os.path.basename(fourth), "Owned export (3).docx")
+
+    def test_damaged_export_record_keeps_existing_file(self):
+        note = os.path.join(TMP, "Damaged record.md")
+        first = lawnotes.export_note(note, ["First"], "docx")
+        with open(lawnotes.export_records_file(), "w") as f:
+            f.write("{broken")
+        second, reason = lawnotes.export_note(note, ["Second"], "docx", details=True)
+        self.assertEqual(os.path.basename(second), "Damaged record (2).docx")
+        self.assertEqual(reason, "no export record")
+        with open(first, "rb") as a, open(second, "rb") as b:
+            self.assertNotEqual(a.read(), b.read())
+
+    def test_missing_export_record_keeps_existing_file(self):
+        note = os.path.join(TMP, "No record.md")
+        first = lawnotes.export_note(note, ["First"], "docx")
+        os.remove(lawnotes.export_records_file())
+        second, reason = lawnotes.export_note(note, ["Second"], "docx", details=True)
+        self.assertEqual(os.path.basename(second), "No record (2).docx")
+        self.assertEqual(reason, "no export record")
+        with open(first, "rb") as a, open(second, "rb") as b:
+            self.assertNotEqual(a.read(), b.read())
+
+    def test_same_size_with_new_mtime_is_kept(self):
+        note = os.path.join(TMP, "Same size.md")
+        first = lawnotes.export_note(note, ["First"], "docx")
+        old = os.stat(first)
+        with open(first, "r+b") as f:
+            f.write(b"X")
+        os.utime(first, ns=(old.st_atime_ns, old.st_mtime_ns + 1_000_000_000))
+        second = lawnotes.export_note(note, ["Second"], "docx")
+        self.assertEqual(os.path.basename(second), "Same size (2).docx")
+        with open(first, "rb") as f:
+            self.assertEqual(f.read(1), b"X")
+
+    def test_name_claim_race_uses_next_free_name(self):
+        first = os.path.join(self.out, "Raced.docx")
+        original_link = os.link
+
+        def claim_first(src, dst):
+            if dst == first:
+                with open(dst, "wb") as f:
+                    f.write(b"Other export")
+                raise FileExistsError(dst)
+            return original_link(src, dst)
+
+        def render(path):
+            with open(path, "wb") as f:
+                f.write(b"Our export")
+
+        with mock.patch.object(lawnotes.os, "link", side_effect=claim_first):
+            out, reason = lawnotes.write_export("Raced", "docx", render)
+        self.assertEqual(os.path.basename(out), "Raced (2).docx")
+        self.assertEqual(reason, "name already used")
+        with open(first, "rb") as f:
+            self.assertEqual(f.read(), b"Other export")
+
+    def test_export_cleanup_ignores_extra_hidden_file(self):
+        def render(path):
+            with open(path, "wb") as f:
+                f.write(b"Exported")
+            with open(os.path.join(os.path.dirname(path), ".DS_Store"), "wb") as f:
+                f.write(b"Finder")
+
+        out, _reason = lawnotes.write_export("Cleanup", "docx", render)
+        with open(out, "rb") as f:
+            self.assertEqual(f.read(), b"Exported")
+        self.assertFalse(any(name.startswith(".lawnotes-") for name in os.listdir(self.out)))
+
+    def test_late_save_keeps_the_original(self):
+        def render(path):
+            with open(path, "wb") as f:
+                f.write(b"ours")
+
+        real_lstat = os.lstat
+        for kind in ("size", "mtime", "inode"):
+            with self.subTest(kind=kind):
+                name = "Late " + kind
+                first, _reason = lawnotes.write_export(name, "docx", render)
+                before = real_lstat(first)
+                changed = False
+
+                def late_stat(path):
+                    nonlocal changed
+                    old = real_lstat(path)
+                    if path == first and not changed:
+                        changed = True
+                        if kind == "inode":
+                            replacement = os.path.join(self.out, "replacement")
+                            with open(replacement, "wb") as f:
+                                f.write(b"edit")
+                            os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+                            os.replace(replacement, first)
+                        else:
+                            with open(first, "wb") as f:
+                                f.write(b"edited" if kind == "size" else b"edit")
+                            if kind == "mtime":
+                                os.utime(first, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+                    return old
+
+                with mock.patch.object(lawnotes.os, "lstat", side_effect=late_stat):
+                    second, reason = lawnotes.write_export(name, "docx", render)
+                self.assertTrue(changed)
+                self.assertEqual(os.path.basename(second), name + " (2).docx")
+                self.assertEqual(reason, name + ".docx changed")
+                with open(first, "rb") as f:
+                    self.assertEqual(f.read(), b"edited" if kind == "size" else b"edit")
+
+    def test_missing_export_files_are_pruned_from_records(self):
+        def render(path):
+            with open(path, "wb") as f:
+                f.write(b"Exported")
+
+        cache = os.path.join(tempfile.mkdtemp(dir=TMP), "cache")
+        with mock.patch.object(lawnotes, "CACHE_DIR", cache):
+            old, _reason = lawnotes.write_export("Old", "docx", render)
+            os.remove(old)
+            new, _reason = lawnotes.write_export("New", "docx", render)
+            with open(lawnotes.export_records_file()) as f:
+                records = json.load(f)
+        self.assertNotIn(old, records)
+        self.assertIn(new, records)
+
+    def test_pdf_name_with_converter_stub(self):
+        def run(args, **_kwargs):
+            if args[0] == "pdf-helper":
+                with open(args[-1], "wb") as f:
+                    f.write(b"%PDF from helper")
+            else:
+                with open(args[-1], "w") as f:
+                    f.write("<html><body>Note</body></html>")
+            return subprocess.CompletedProcess(args, 0, stderr="")
+
+        note = os.path.join(TMP, "PDF copy.md")
+        with mock.patch.object(lawnotes, "compiled_helper", return_value="pdf-helper"), \
+                mock.patch.object(lawnotes.subprocess, "run", side_effect=run):
+            first = lawnotes.export_note(note, ["First"], "pdf")
+            with open(first, "wb") as f:
+                f.write(b"Edited PDF")
+            second = lawnotes.export_note(note, ["Second"], "pdf")
+        self.assertEqual(os.path.basename(second), "PDF copy (2).pdf")
+        with open(first, "rb") as f:
+            self.assertEqual(f.read(), b"Edited PDF")
+
+    def test_cli_preserves_edited_export(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Cli export.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        with open(note, "w") as f:
+            f.write("First\n")
+        env = dict(os.environ, LAWNOTES_EXPORT_DIR=self.out)
+        command = [sys.executable, os.path.join(ROOT, "lawnotes.py"), "--export", "Cli export", "docx"]
+        first = subprocess.run(command, env=env, capture_output=True, text=True)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        path = first.stdout.strip()
+        with open(path, "wb") as f:
+            f.write(b"Edited in Word")
+        second = subprocess.run(command, env=env, capture_output=True, text=True)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(os.path.basename(second.stdout.strip()), "Cli export (2).docx")
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), b"Edited in Word")
+
+    def test_menu_names_the_copy_at_forty_columns(self):
+        note = os.path.join(lawnotes.NOTES_DIR, "Safe.md")
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        with open(note, "w") as f:
+            f.write("First\n")
+        first = lawnotes.export_note(note, ["First"], "docx")
+        with open(first, "wb") as f:
+            f.write(b"Edited in Word")
+        s = Session(note, env={"LAWNOTES_EXPORT_DIR": self.out}, size=(40, 40))
+        try:
+            self.assertIn("Word document", s.keys(b"\x1be", 0.5))
+            screen = s.keys(b"Word document\r", 1.5)
+            for _ in range(30):
+                if "(2).docx saved: Safe.docx changed" in screen:
+                    break
+                screen += s.keys(b"", 0.1)
+            self.assertIn("(2).docx saved: Safe.docx changed", screen)
+            self.assertTrue(os.path.exists(os.path.join(self.out, "Safe (2).docx")))
+            self.assertTrue(s.quit())
+        finally:
+            try:
+                os.kill(s.pid, 9)
+            except OSError:
+                pass
+            try:
+                os.waitpid(s.pid, 0)
+            except OSError:
+                pass
+        with open(first, "rb") as f:
+            self.assertEqual(f.read(), b"Edited in Word")
+
+    def test_pack_preserves_edited_export(self):
+        notes = [("Offer", ["First rule."])]
+        first = lawnotes.export_revision_pack("Safe", notes, "docx")
+        self.assertEqual(lawnotes.export_revision_pack("Safe", notes, "docx"), first)
+        with open(first, "wb") as f:
+            f.write(b"Edited pack")
+        second = lawnotes.export_revision_pack("Safe", notes, "docx")
+        self.assertEqual(os.path.basename(second), "Safe revision pack (2).docx")
+        with open(first, "rb") as f:
+            self.assertEqual(f.read(), b"Edited pack")
+
+
 if __name__ == "__main__":
     unittest.main()
