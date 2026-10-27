@@ -30,7 +30,7 @@ Keys (press ^G inside the editor for this list)
   ^P search all notes   ^B case index (every case across all notes)
   ^R version history — restore an earlier version of this note
   Option+C revision cards — revise the cases in your notes (F7 also works)
-  Option+X exam mode — timed essay or problem question (F8 also works)
+  Option+X exam mode — timed essay, or a word limit kept in the note (F8 also works)
   Shift+arrows select   ^C copy   ^X cut   ^V paste (Mac clipboard); click to place the cursor
   ^K cut line    ^U paste lines   ^Z undo          ^Y redo
   ^A / ^E line start / end        Option/Ctrl+arrows move by word
@@ -466,6 +466,10 @@ MARK_RE = re.compile(r"==(?=\S).+?(?<=\S)==")
 LINK_RE = re.compile(r"\[\[\s*([^\s\[\]|#][^\[\]|#]*)(?:#([^\[\]|]*))?(?:\|([^\[\]]*))?\]\]")
 # A footnote definition is a note, not part of the essay. [^1] in the text is only a reference.
 FOOTNOTE_DEF_RE = re.compile(r"^[ \t]*\[\^[0-9]+\]:")
+# A word limit kept in the note, written as "// Word limit 2,000". Read tolerantly: any case,
+# an optional colon, commas in the number. Matched at the start of a line, so deleting that
+# line removes the limit. Nothing else stores it.
+WORD_LIMIT_RE = re.compile(r"^\s*//\s*word limit:?\s*([\d,]+)", re.I)
 FOOTREF_RE = re.compile(r"\[\^[0-9]+\]")
 IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)\s]*\)")          # ![alt](url)
 MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)\s]*\)")         # [text](url)
@@ -575,13 +579,47 @@ def exam_over(seconds):
     return f"+{h}:{m:02d}:{s:02d}" if h else f"+{m}:{s:02d}"
 
 
-def exam_words_text(words, limit, running):
-    """1,214/2,000 words while a limit is still running; otherwise 1,987 words."""
-    if running and limit:
+def exam_words_text(words, limit, running, essay=False):
+    """1,214/2,000 words while a limit applies: the exam clock is still running, or essay mode
+    (no clock). Once the clock has stopped, 1,987 words, even if a limit was set."""
+    if limit and (running or essay):
         return f"{words:,}/{limit:,} words"
     if words == 1:
         return "1 word"
     return f"{words:,} words"
+
+
+def word_limit_line(n):
+    """The comment written into the note. The reader also accepts looser forms."""
+    return f"// Word limit {n:,}"
+
+
+def word_limit_at(lines):
+    """(line index, limit) of the first word-limit comment, or (None, None).
+
+    The same range the prompt accepts: 1 to 1,000,000. A longer digit string is not a
+    limit (and is not passed to int(), which rejects it on Python 3.11)."""
+    for i, line in enumerate(lines):
+        m = WORD_LIMIT_RE.match(line)
+        if not m:
+            continue
+        digits = m.group(1).replace(",", "").lstrip("0")
+        if not digits or len(digits) > 7:
+            continue
+        n = int(digits)
+        if 1 <= n <= 1000000:
+            return i, n
+    return None, None
+
+
+def essay_status(words, limit, footnotes):
+    """(status text, the count inside it, whether the count is past the limit).
+
+    1,214/2,000 words, and · 12 fn when the note has footnotes. On the limit is not past it.
+    Footnote definitions are not part of the word count."""
+    count = exam_words_text(words, limit, False, essay=True)
+    text = f"{count} · {footnotes} fn" if footnotes else count
+    return text, count, words > limit
 
 
 def exam_status(remaining, words, limit):
@@ -609,18 +647,91 @@ def exam_warning(minutes, remaining, told10, told5):
     return None, told10, told5
 
 
-def exam_bar_text(name, message, essential, width):
+def exam_bar_text(name, message, essential, width, save=""):
     """One status line of `width` columns. The clock and the count stay whole, on the right.
-    A note such as "10 minutes left" comes before the note's name, which is cut first."""
+    A note such as "10 minutes left" comes before the note's name, which is cut first.
+    On the essay bar, `save` ("● unsaved" or "✓ saved") sits between the name and the count,
+    and the name is cut before it. A message outranks that save state: the message stays
+    whole, and the save state is dropped before the message is cut. One space stays before
+    the count. A message that cannot show six characters is left off."""
     if width <= 0:
         return ""
     essential = essential[:width]
     room = width - len(essential)
-    parts = [p for p in (message, name) if p]
-    left = (" " + "  ".join(parts)) if parts else ""
-    if len(left) > room:
-        left = left[:room]
+
+    def plain():
+        parts = [p for p in (message, name) if p]
+        left = (" " + "  ".join(parts)) if parts else ""
+        if len(left) > room:
+            left = left[:room]
+        return left.ljust(room) + essential
+
+    if not save:
+        return plain()
+    # Essay bar. One space stays before the count. A message shows whole, or at least
+    # six characters; a shorter fragment is dropped. The name is cut first, and the
+    # save state is dropped before that message is cut.
+    left = essay_bar_left(name, message or "", save, room)
     return left.ljust(room) + essential
+
+
+def essay_bar_left(name, message, save, room):
+    """The essay bar's left side, at most `room` columns, padded out to `room`.
+
+    A non-empty side ends in a space (two, when the save state is there), so the count
+    never sits against it. The name is cut first. A message is kept whole when it fits;
+    otherwise a prefix of at least six characters, or nothing. The save state is dropped
+    before the message is cut."""
+    if room <= 0:
+        return ""
+    name, message, save = name or "", message or "", save or ""
+
+    def pack(msg, nm, state):
+        parts = [p for p in (msg, nm, state) if p]
+        if not parts:
+            return ""
+        body = " " + "  ".join(parts)
+        # The save state keeps the ordinary bar's two-space gap. Anything else keeps one
+        # space, so a cut name or message never sits against the count.
+        tail = "  " if state else " "
+        if len(body) + len(tail) > room:
+            return None
+        return body + tail
+
+    def place(msg, nm, state):
+        """Fit this exact message: cut the name, then drop the save state."""
+        dropped = False
+        while True:
+            got = pack(msg, nm, state)
+            if got is not None:
+                return got
+            if nm:
+                nm = nm[:-1]
+                continue
+            if state and not dropped:
+                state, nm, dropped = "", name, True
+                continue
+            return None
+
+    shown = place(message, name, save) if message else None
+    if message and shown is None and len(message) > 6:
+        for n in range(len(message) - 1, 5, -1):  # 6 characters is the shortest fragment kept
+            shown = place(message[:n], name, save)
+            if shown is not None:
+                break
+    if not shown:
+        shown = place("", name, save) or ""
+    return shown.ljust(room)
+
+
+def essay_bar_text(name, message, status, dirty, width):
+    """Essay status line. The count stays whole on the right.
+
+    With no message, ● unsaved or ✓ saved comes next and the name is cut first.
+    A message outranks the save state. At least one space stays before the count,
+    and a message that cannot show six characters is left off."""
+    state = "● unsaved" if dirty else "✓ saved"
+    return exam_bar_text(name, message, status, width, state)
 
 
 def pair_of(attr):
@@ -694,6 +805,8 @@ class Buffer:
         self.version = 0    # bumped on every change, so derived values (word count) can be cached
         self._words = (None, 0)
         self._body = (None, 0)
+        self._limit = (None, None)  # (cache key, word limit or None)
+        self._fn = (None, 0)
         if os.path.exists(path):
             self.load()
 
@@ -806,6 +919,20 @@ class Buffer:
         if self._body[0] != key:
             self._body = (key, body_words(self.lines))
         return self._body[1]
+
+    def word_limit(self):
+        """The note's word limit, or None. Reread only after the text changes."""
+        key = (self.version, len(self.lines))
+        if self._limit[0] != key:
+            self._limit = (key, word_limit_at(self.lines)[1])
+        return self._limit[1]
+
+    def footnote_count(self):
+        """Footnote definitions. Recounted only after the text changes."""
+        key = (self.version, len(self.lines))
+        if self._fn[0] != key:
+            self._fn = (key, sum(1 for line in self.lines if FOOTNOTE_DEF_RE.match(line)))
+        return self._fn[1]
 
     def undo(self):
         return self._swap(self.undo_stack, self.redo_stack)
@@ -2241,7 +2368,7 @@ HELP = [
     ("^L", "Outline: jump to any heading or case in this note."),
     ("#", "Revising"),
     ("Option+C", "Revision cards from your notes: each case brief (^T) is a card (the case and citation on the front, the brief on the back), and so is a bullet that names a case and says something about it. Choose this note, its folder or all notes. Space shows the answer; then 1 again, 2 hard, 3 good. Cards come back after 1, 3, 7, 14, 30, then 60 days; due cards first, then new ones. Esc ends. Progress is kept in UCL Notes, so every Mac shares it. Only numbered iCloud conflict copies are merged; other similarly named files are left alone. If progress cannot be read, a rating is not saved and the status bar warns you. F7 does the same."),
-    ("Option+X", "Exam mode for a timed essay or problem question. It asks how many minutes, then a word limit (leave the limit blank for none); Esc cancels either. The status bar shows the time left and the words in the note, or after the end how long since (Time's up). The count is the body only: // comments, footnote lines ([^1]: …) and Markdown markers are left out — headings, bullets, *italic*, **bold**, ==highlights==, `code`, links and [^1] references. The words a link shows are counted. It tells you once at 10 minutes and once at 5. Past the limit the count uses the theme's warning colour. You can keep writing the whole time. Option+X again asks whether to stop. Closing the pane or quitting ends it. F8 does the same."),
+    ("Option+X", "Exam mode for a timed essay or problem question. It asks how many minutes, then a word limit (leave the limit blank for none); Esc cancels either. The status bar shows the time left and the words in the note, or after the end how long since (Time's up). The count is the body only: // comments, footnote lines ([^1]: …) and Markdown markers are left out — headings, bullets, *italic*, **bold**, ==highlights==, `code`, links and [^1] references. The words a link shows are counted. It tells you once at 10 minutes and once at 5. Past the limit the count uses the theme's warning colour. You can keep writing the whole time. Option+X again asks whether to stop. Closing the pane or quitting ends it. Leave the minutes blank to set a word limit on this note instead, with no clock. Law Notes writes // Word limit 2,000 at the top of the note. That line is a comment, so it is left out of the count and of exports. The status bar shows 1,214/2,000 words, and · 12 fn when there are footnotes. Past the limit that count uses the warning colour too. Delete the line, or change the number, to change the limit. On a note that already has one, Option+X asks c change, r remove, or e for a timed exam; Esc cancels. While an exam is running, its status replaces that count. F8 does the same."),
     ("#", "Moving around"),
     ("^F", "Find. Press ^F and Enter again (or F3) for the next match; Esc clears the highlight."),
     ("Option+R", "Find and replace, e.g. Donohue → Donoghue. Type what to replace (it starts as the selected text or your ^F search) and what to put instead, then choose: this note, all notes, or one match at a time (y replace, n skip, a all the rest, Esc stop). Capitals must match exactly. All notes skips read-only notes and closed links to files outside the notes folder; open an outside link to replace there. Links to the same file are replaced once, even if spelled differently. It lists Finder-locked notes it cannot save. If a note changed elsewhere, a conflict copy is listed for you to merge. The replacements stay highlighted until Esc. ^Z undoes a replace in an open note; other notes are saved in version history first, so ^R can restore them. F4 does the same."),
@@ -3008,6 +3135,9 @@ class App:
         if self.pane.exam:
             self.draw_exam_bar(top_y + height - 1, left_x, barw, name, active, b)
             return cursor if active else None
+        if b.word_limit():
+            self.draw_essay_bar(top_y + height - 1, left_x, barw, name, active, b)
+            return cursor if active else None
         words = b.word_count()
         left = f" {name}  {'● unsaved' if b.dirty else '✓ saved'}"
         if active and time.time() < self.msg_until:
@@ -3052,9 +3182,99 @@ class App:
             if 0 <= at < barw:
                 self.put(y, x + at, count[:barw - at], self.A["spell"])
 
+    def draw_essay_bar(self, y, x, barw, name, active, b):
+        """Status line for a note that carries a word limit.
+
+        The count stays whole, with a space before it. With no message, ● unsaved or ✓ saved
+        comes next and the name is cut first. A message stays whole and the save state is
+        dropped before it. A message that cannot show six characters is left off.
+        Past the limit the count uses the theme's warning colour, the same highlight as a
+        misspelt word. A running exam draws its own bar instead of this one."""
+        text, count, over = essay_status(b.body_word_count(), b.word_limit(), b.footnote_count())
+        message = ""
+        if active and time.time() < self.msg_until:
+            message = self.msg
+        elif active and self.spell_hint():
+            message = self.spell_hint()
+        elif active and self.link_hint():
+            message = self.link_hint()
+        shown = essay_bar_text(name, message, text, b.dirty, barw)
+        look = ("match" if self.save_failed else "bar") if active else "bar_off"
+        if barw < 1:
+            return
+        self.put(y, x, shown[:barw].ljust(barw), self.A[look])
+        if over:
+            at = shown.rfind(count)
+            if 0 <= at < barw:
+                self.put(y, x + at, count[:barw - at], self.A["spell"])
+
+    def set_word_limit(self, n):
+        """Write the limit at the top, or replace the limit line already in the note."""
+        b = self.buf
+        new = word_limit_line(n)
+        idx, _ = word_limit_at(b.lines)
+        if idx is not None and b.lines[idx] == new:
+            self.say(f"Word limit {n:,}")
+            return
+        b.checkpoint("essay")
+        if idx is None:
+            b.lines.insert(0, new)
+            b.cy += 1
+            if self.top:
+                self.top += 1
+            if self.anchor:
+                self.anchor = (self.anchor[0] + 1, self.anchor[1])
+        else:
+            b.lines[idx] = new
+        b.cy = min(b.cy, len(b.lines) - 1)
+        b.cx = min(b.cx, len(b.lines[b.cy]))
+        if self.anchor:
+            ay = min(self.anchor[0], len(b.lines) - 1)
+            self.anchor = (ay, min(self.anchor[1], len(b.lines[ay])))
+        b.sel_anchor = self.anchor
+        b._after = (b.cy, b.cx)
+        self.say(f"Word limit {n:,}")
+
+    def clear_word_limit(self):
+        """Delete the note's word-limit line. The limit lives only in that line."""
+        b = self.buf
+        idx, _ = word_limit_at(b.lines)
+        if idx is None:
+            return
+        b.checkpoint("essay")
+        del b.lines[idx]
+        if not b.lines:
+            b.lines.append("")
+        if b.cy > idx:
+            b.cy -= 1
+        elif b.cy == idx:
+            b.cy = min(idx, len(b.lines) - 1)
+            b.cx = 0
+        if self.top > idx:
+            self.top -= 1
+        elif self.top == idx:
+            self.top_seg = 0
+        self.top = min(self.top, max(0, len(b.lines) - 1))
+        b.cy = min(b.cy, len(b.lines) - 1)
+        b.cx = min(b.cx, len(b.lines[b.cy]))
+        if self.anchor:
+            ay, ax = self.anchor
+            if ay > idx:
+                ay -= 1
+            elif ay == idx:
+                ay, ax = min(idx, len(b.lines) - 1), 0
+            ay = min(ay, len(b.lines) - 1)
+            self.anchor = (ay, min(ax, len(b.lines[ay])))
+        b.sel_anchor = self.anchor
+        b._after = (b.cy, b.cx)
+        self.say("Word limit removed")
+
     def exam_mode(self):
-        """Option+X or F8: a countdown on this pane for a timed essay or problem question.
-        The note stays editable. Closing the pane, opening another note, or quitting ends it."""
+        """Option+X or F8. An exam already running: offer to stop it.
+        A word-limit line in the note: change it, remove it, or start a timed exam.
+        Otherwise ask for minutes. Blank minutes sets a word limit on this note
+        (// Word limit 2,000 at the top). A number of minutes starts an exam, as before.
+        The note stays editable. Closing the pane, opening another note, or quitting ends an exam."""
         if not self.buf:
             return
         if self.pane.exam:
@@ -3064,6 +3284,10 @@ class App:
             return
 
         def number(label, retry, limit, blank=False):
+            """A whole number from the bottom line, or None if Esc cancels.
+            An empty line is 0 only when blank is set: essay mode's minutes, or an exam
+            with no word limit. A timed exam's minutes prompt leaves it unset, so an
+            empty line is asked again."""
             while True:
                 raw = self.prompt(label)
                 if raw is None:
@@ -3079,14 +3303,40 @@ class App:
                     return n
                 label = retry
 
-        minutes = number("Minutes (e.g. 90): ", "Minutes as a number, e.g. 90: ", 9999)
+        def begin_exam(minutes):
+            limit = number("Word limit (blank for none): ", "A number, or blank for none: ", 1000000, blank=True)
+            if limit is None:
+                return
+            self.pane.exam = {"end": time.time() + minutes * 60, "limit": limit or None,
+                              "minutes": minutes, "told10": False, "told5": False}
+
+        def start_exam():
+            minutes = number("Minutes (e.g. 90): ", "Minutes as a number, e.g. 90: ", 9999)
+            if not minutes:
+                return
+            begin_exam(minutes)
+
+        if self.buf.word_limit():
+            key = self.ask("c change · r remove · e exam", "cre")
+            if key == "c":
+                n = number("New word limit: ", "A number, e.g. 2,000: ", 1000000)
+                if n:
+                    self.set_word_limit(n)
+            elif key == "r":
+                self.clear_word_limit()
+            elif key == "e":
+                start_exam()
+            return
+
+        minutes = number("Minutes (blank for word limit): ", "Minutes as a number, e.g. 90: ", 9999, blank=True)
+        if minutes is None:
+            return
         if not minutes:
+            n = number("Word limit for this note: ", "A number, e.g. 2,000: ", 1000000)
+            if n:
+                self.set_word_limit(n)
             return
-        limit = number("Word limit (blank for none): ", "A number, or blank for none: ", 1000000, blank=True)
-        if limit is None:
-            return
-        self.pane.exam = {"end": time.time() + minutes * 60, "limit": limit or None,
-                          "minutes": minutes, "told10": False, "told5": False}
+        begin_exam(minutes)
 
     # Input helpers
     def read_char(self):
@@ -4102,6 +4352,7 @@ class App:
                 p.cx, p.anchor = moved_col(b.lines[p.cy], p.cx, find, repl), None
         b.cx = moved_col(b.lines[b.cy], b.cx, find, repl)
         b.lines = lines
+        b.touch()  # checkpoint ran before the text changed; the caches must see these lines
         self.anchor = None
         return n
 
@@ -4214,9 +4465,11 @@ class App:
                 done += line[j:].count(find) + sum(l.count(find) for l in b.lines[i + 1:])
                 b.lines[i] = line[:j] + line[j:].replace(find, repl)
                 b.lines[i + 1:] = [l.replace(find, repl) for l in b.lines[i + 1:]]
+                b.touch()  # one undo step covers every match; each edit still refreshes the caches
                 end = (i, j + len(repl))
                 break
             b.lines[i] = line[:j] + repl + line[j + len(find):]
+            b.touch()
             done += 1
             j += len(repl)
             end = (i, j)
@@ -5051,6 +5304,7 @@ class App:
             self.check_oscola()
         elif key in ("exam", curses.KEY_F8):
             self.exam_mode()
+            keep_selection = self.anchor is not None  # setting or clearing a limit keeps the selection
         elif key == "links":
             self.links()
         elif key == "\x0c":

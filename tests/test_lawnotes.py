@@ -3095,5 +3095,377 @@ class ExportSafetyTests(unittest.TestCase):
             self.assertEqual(f.read(), b"Edited pack")
 
 
+class EssayModeTests(unittest.TestCase):
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(dir=TMP), "Essay.md")
+
+    def test_limit_line_is_read_tolerantly_and_left_out(self):
+        accept = ("// Word limit 2,000", "// word limit 2000", "// WORD LIMIT: 2,000",
+                  "//word limit:2,000", "   // Word limit 2,000", "// Word limit 2,000 extra")
+        for line in accept:
+            self.assertEqual(lawnotes.word_limit_at([line])[1], 2000, line)
+            self.assertEqual(lawnotes.body_words([line, "Duty of care"]), 3, line)
+            self.assertEqual(lawnotes.export_markdown([line, "Duty of care"]), "Duty of care\n", line)
+        self.assertIsNone(lawnotes.word_limit_at(["Duty // Word limit 2,000"])[1])  # not its own line
+        self.assertIsNone(lawnotes.word_limit_at(["// Word limit"])[1])
+        self.assertIsNone(lawnotes.word_limit_at(["// Word limit 0"])[1])
+        self.assertIsNone(lawnotes.word_limit_at(["// Word limit ,"])[1])
+        self.assertEqual(lawnotes.word_limit_at(["# Title", "// word limit: 1,500"])[1], 1500)
+        self.assertEqual(lawnotes.word_limit_at(["// Word limit 10", "// Word limit 20"]), (0, 10))
+        self.assertEqual(lawnotes.word_limit_line(2000), "// Word limit 2,000")
+        self.assertEqual(lawnotes.word_limit_line(1000000), "// Word limit 1,000,000")
+        # The prompt's range, and nothing past it. A huge digit string is not a limit, and is
+        # not handed to int() (Python 3.11 rejects anything over about 4,300 digits).
+        self.assertEqual(lawnotes.word_limit_at(["// Word limit 1"])[1], 1)
+        self.assertEqual(lawnotes.word_limit_at([lawnotes.word_limit_line(1000000)])[1], 1000000)
+        self.assertEqual(lawnotes.word_limit_at(["// Word limit 1,000,000"])[1], 1000000)
+        self.assertIsNone(lawnotes.word_limit_at(["// Word limit 1000001"])[1])
+        self.assertIsNone(lawnotes.word_limit_at(["// Word limit 1,000,001"])[1])
+        self.assertIsNone(lawnotes.word_limit_at(["// Word limit 10000000"])[1])
+        huge = "// Word limit " + "9" * 5000
+        self.assertEqual(lawnotes.word_limit_at([huge, "// Word limit 12"]), (1, 12))
+        capped = lawnotes.Buffer(self.path)
+        capped.lines = [huge]
+        capped.touch()
+        self.assertIsNone(capped.word_limit())
+        md = lawnotes.export_markdown(["Duty // Word limit 9", "// Word limit 2,000"])
+        self.assertIn("Duty", md)
+        self.assertNotIn("2,000", md)
+        pack = lawnotes.revision_pack_markdown(
+            [("Essay", ["// Word limit 2,000", "Duty owed by D."])], "Tort", datetime.date(2026, 10, 26))
+        self.assertNotIn("Word limit", pack)
+        self.assertIn("Duty owed", pack)
+
+    def test_essay_status_count_footnotes_and_narrow_bar(self):
+        # exam mode's wording is unchanged: x/y only while the clock is running
+        self.assertEqual(lawnotes.exam_words_text(1214, 2000, True), "1,214/2,000 words")
+        self.assertEqual(lawnotes.exam_words_text(1214, 2000, False), "1,214 words")
+        self.assertEqual(lawnotes.exam_words_text(1, None, False), "1 word")
+        self.assertEqual(lawnotes.exam_words_text(1214, 2000, False, essay=True), "1,214/2,000 words")
+        text, count, over = lawnotes.essay_status(1214, 2000, 12)
+        self.assertEqual((text, count, over), ("1,214/2,000 words · 12 fn", "1,214/2,000 words", False))
+        self.assertEqual(lawnotes.essay_status(1214, 2000, 0)[0], "1,214/2,000 words")
+        self.assertEqual(lawnotes.essay_status(1, 2000, 1), ("1/2,000 words · 1 fn", "1/2,000 words", False))
+        self.assertFalse(lawnotes.essay_status(2000, 2000, 0)[2])
+        self.assertTrue(lawnotes.essay_status(2001, 2000, 3)[2])
+        essential = "1,214/2,000 words · 12 fn"
+        for message in ("", "Word limit 2,000"):
+            line = lawnotes.exam_bar_text("EssayLimit/Negligence Essay.md", message, essential, 39)
+            self.assertEqual(len(line), 39, line)
+            self.assertTrue(line.endswith(essential), line)
+            self.assertNotIn("Essay.md", line)
+
+    def test_essay_bar_keeps_the_save_state_at_forty_columns(self):
+        # A full-width pane leaves the last cell alone, so a 40-column screen draws 39.
+        name = "EssayLimit/Negligence Essay.md"
+        status, count, _ = lawnotes.essay_status(1214, 2000, 12)
+        for dirty, state in ((True, "● unsaved"), (False, "✓ saved")):
+            for width in (39, 40):
+                line = lawnotes.essay_bar_text(name, "", status, dirty, width)
+                self.assertEqual(len(line), width, line)
+                self.assertIn(state, line)
+                self.assertTrue(line.endswith(status), line)
+                self.assertLess(line.index(state), line.index(count))
+                self.assertNotIn(name, line)
+        wide = lawnotes.essay_bar_text(name, "", status, False, 80)
+        self.assertIn(name, wide)
+        self.assertLess(wide.index(name), wide.index("✓ saved"))
+        self.assertLess(wide.index("✓ saved"), wide.index(count))
+        self.assertTrue(wide.endswith(status))
+
+    def test_essay_message_stays_whole_at_forty_columns(self):
+        message = "Exam stopped"  # 12 characters, the note the Session test looks for
+        self.assertEqual(len(message), 12)
+        status, count, _ = lawnotes.essay_status(1214, 2000, 0)
+        self.assertEqual(status, "1,214/2,000 words")
+        name = "EssayLimit/Negligence Essay.md"
+        for dirty, state in ((True, "● unsaved"), (False, "✓ saved")):
+            line = lawnotes.essay_bar_text(name, message, status, dirty, 40)
+            self.assertEqual(len(line), 40, line)
+            self.assertIn(message, line)
+            self.assertTrue(line.endswith(" " + status), line)  # a space stays before the count
+            self.assertNotIn(state, line)  # dropped before the message is cut
+            self.assertLess(line.index(message), line.index(count))
+        # Plenty of room: the save state stays, and so does the message.
+        wide = lawnotes.essay_bar_text(name, message, status, False, 80)
+        self.assertIn(message, wide)
+        self.assertIn(name, wide)
+        self.assertIn("✓ saved", wide)
+        self.assertTrue(wide.endswith(status))
+        # The 40-column pane draws 39 columns. This is the line that cut "Exam stopped".
+        over = lawnotes.essay_status(5, 2, 2)[0]
+        line = lawnotes.essay_bar_text(name, message, over, False, 39)
+        self.assertEqual(len(line), 39, line)
+        self.assertIn(message, line)
+        self.assertTrue(line.endswith(" " + over), line)
+        self.assertNotIn("✓ saved", line)
+
+    def test_narrow_message_keeps_a_space_before_the_count(self):
+        # 30 columns, the long count: five columns left. "Exam stopped" used to be cut to
+        # " Exa" and printed against the count ("Exa1,214…").
+        message = "Exam stopped"
+        status, count, _ = lawnotes.essay_status(1214, 2000, 12)
+        self.assertEqual(len(status), 25)
+        name = "Negligence"
+        line = lawnotes.essay_bar_text(name, message, status, True, 30)
+        self.assertEqual(len(line), 30, line)
+        self.assertTrue(line.endswith(" " + status), line)
+        self.assertNotIn("Exam", line)  # six characters will not fit, so the message is left off
+        self.assertNotIn("●", line)
+        # Eight columns of room: the longest prefix that fits, and nothing shorter than six.
+        wider = lawnotes.essay_bar_text(name, message, status, False, 33)
+        self.assertEqual(len(wider), 33, wider)
+        self.assertIn("Exam s", wider)
+        self.assertNotIn("Exam st", wider)
+        self.assertTrue(wider.endswith(" " + status), wider)
+        self.assertNotIn("✓", wider)
+        # A whole message shorter than six is kept when it fits, and left off when it does not.
+        short = lawnotes.essay_bar_text(name, "Done", status, False, 31)
+        self.assertIn("Done", short)
+        self.assertTrue(short.endswith(" " + status), short)
+        squeezed = lawnotes.essay_bar_text(name, "Done", status, True, 30)
+        self.assertNotIn("Done", squeezed)
+        self.assertNotIn("Don", squeezed)
+        self.assertTrue(squeezed.endswith(" " + status), squeezed)
+
+    def test_count_is_cached_until_the_text_changes(self):
+        b = lawnotes.Buffer(self.path)
+        b.lines = ["// Word limit 2,000", "Hello there"]
+        self.assertEqual(b.word_limit(), 2000)
+        self.assertEqual(b.body_word_count(), 2)
+        self.assertEqual(b.footnote_count(), 0)
+        b.lines[0] = "// word limit: 1,500"  # same lines, no edit yet: the cache stands
+        self.assertEqual(b.word_limit(), 2000)
+        b.touch()
+        self.assertEqual(b.word_limit(), 1500)
+        self.assertEqual(b.footnote_count(), 0)  # warm the cache, then edit in place
+        self.assertEqual(b.body_word_count(), 2)
+        b.lines[1] = "[^1]: hidden words that do not count"
+        self.assertEqual(b.footnote_count(), 0)
+        self.assertEqual(b.body_word_count(), 2)
+        b.touch()
+        self.assertEqual(b.footnote_count(), 1)
+        self.assertEqual(b.body_word_count(), 0)  # the footnote line is not part of the essay
+        self.assertGreater(b.word_count(), 0)
+        del b.lines[0]
+        b.touch()
+        self.assertIsNone(b.word_limit())
+
+    def review_app(self, lines):
+        """An App without a screen, for a replace that redraws (and so fills the caches) between matches."""
+        app = object.__new__(lawnotes.App)
+        app.pane = lawnotes.Pane()
+        app.layout = lawnotes.Layout.leaf(app.pane)
+        for attr in lawnotes.App.VIEW_ATTRS:
+            setattr(app, attr, getattr(app.pane, attr))
+        app.buf = lawnotes.Buffer(self.path)
+        app.buf.lines = list(lines)
+        app.search = ""
+        app.say = lambda *args, **kwargs: None
+        return app
+
+    def answering(self, app, answers):
+        """ask() as the review uses it: the note is drawn, which reads the limit and the footnotes."""
+        pending = iter(answers)
+
+        def ask(question, keys):
+            app.buf.word_limit()
+            app.buf.footnote_count()
+            return next(pending)
+
+        app.ask = ask
+
+    def test_replace_rereads_the_limit_and_the_footnotes(self):
+        # y, then a. The first match is not the limit line. The redraw after it caches 2,000;
+        # replacing the limit line itself has to drop that cache, still as one undo step.
+        app = self.review_app(["Pay 2,000 now", "// Word limit 2,000", "[^1]: a note"])
+        self.answering(app, ["y", "a"])
+        b = app.buf
+        app.replace_review("2,000", "1,500", "“1,500”")
+        self.assertEqual(b.lines, ["Pay 1,500 now", "// Word limit 1,500", "[^1]: a note"])
+        self.assertEqual(b.word_limit(), 1500)
+        self.assertEqual(b.footnote_count(), 1)
+        self.assertEqual(len(b.undo_stack), 1)
+        self.assertTrue(b.undo())
+        self.assertEqual(b.lines[1], "// Word limit 2,000")
+        self.assertEqual(b.word_limit(), 2000)
+
+        # The same gap, for the footnote count: each y is its own edit, and the redraw between
+        # them caches the count from the line that is still a footnote.
+        app = self.review_app(["[^1]: one", "[^1]: two"])
+        self.answering(app, ["y", "y"])
+        b = app.buf
+        app.replace_review("[^1]:", "note", "“note”")
+        self.assertEqual(b.lines, ["note one", "note two"])
+        self.assertEqual(b.footnote_count(), 0)
+        self.assertEqual(len(b.undo_stack), 1)
+
+        # Every match at once. The checkpoint is before the text changes; the cache still follows.
+        app = self.review_app(["Pay 1,500 now", "// Word limit 1,500"])
+        b = app.buf
+        b.word_limit()
+        self.assertEqual(app.replace_in_view("1,500", "1,250"), 2)
+        self.assertEqual(b.lines[1], "// Word limit 1,250")
+        self.assertEqual(b.word_limit(), 1250)
+        self.assertEqual(len(b.undo_stack), 1)
+        self.assertEqual(app.replace_in_view("absent", "x"), 0)  # nothing changed: no new undo step
+        self.assertEqual(len(b.undo_stack), 1)
+
+    def test_set_and_clear_write_the_line_at_the_top(self):
+        b = lawnotes.Buffer(self.path)
+        b.lines = ["# Duty", "", "The neighbour principle."]
+        b.cy = b.cx = 0
+        app = type("App", (), {"buf": b, "top": 0, "top_seg": 0, "anchor": None, "msg": ""})()
+        app.say = lambda msg, secs=4: setattr(app, "msg", msg)
+        lawnotes.App.set_word_limit(app, 2000)
+        self.assertEqual(b.lines[0], "// Word limit 2,000")
+        self.assertEqual(b.lines[1:], ["# Duty", "", "The neighbour principle."])
+        self.assertEqual((b.cy, b.cx), (1, 0))  # the cursor stays with the heading
+        self.assertEqual(b.word_limit(), 2000)
+        self.assertEqual(app.msg, "Word limit 2,000")
+        lawnotes.App.set_word_limit(app, 1500)
+        self.assertEqual(b.lines[0], "// Word limit 1,500")
+        self.assertEqual(b.cy, 1)  # replacing the line does not shift the note again
+        self.assertEqual(len(b.undo_stack), 2)
+        lawnotes.App.set_word_limit(app, 1500)  # the same number is not a new edit
+        self.assertEqual(len(b.undo_stack), 2)
+        lawnotes.App.clear_word_limit(app)
+        self.assertEqual(b.lines[0], "# Duty")
+        self.assertIsNone(b.word_limit())
+        self.assertEqual(app.msg, "Word limit removed")
+        self.assertTrue(b.undo())
+        self.assertEqual(b.lines[0], "// Word limit 1,500")
+        self.assertEqual(b.word_limit(), 1500)
+        only = lawnotes.Buffer(self.path + ".2")
+        only.lines = ["// Word limit 2,000"]
+        app.buf = only
+        lawnotes.App.clear_word_limit(app)
+        self.assertEqual(only.lines, [""])
+
+    def test_help_readme_and_questions(self):
+        text = next(desc for key, desc in lawnotes.HELP if key == "Option+X")
+        self.assertIn("Word limit 2,000", text)
+        self.assertIn("12 fn", text)
+        self.assertIn("c change", text)
+        self.assertIn("F8", text)
+        self.assertIn("warning colour", text)
+        with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        self.assertIn("Essay mode (Option+X, leave the minutes blank)", readme)
+        self.assertIn("`// Word limit 2,000`", readme)
+        import inspect
+        src = inspect.getsource(lawnotes.App.exam_mode)
+        questions = [
+            "Stop the exam?  y yes · n no",
+            "Minutes (e.g. 90): ",
+            "Minutes as a number, e.g. 90: ",
+            "Word limit (blank for none): ",
+            "A number, or blank for none: ",
+            "c change · r remove · e exam",
+            "New word limit: ",
+            "A number, e.g. 2,000: ",
+            "Minutes (blank for word limit): ",
+            "Word limit for this note: ",
+        ]
+        for question in questions:
+            self.assertIn(question, src)
+            self.assertLessEqual(len(question), 38, question)
+
+    def test_essay_mode_keys_in_narrow_pane(self):
+        folder = os.path.join(lawnotes.NOTES_DIR, "EssayLimit")
+        os.makedirs(folder, exist_ok=True)
+        note = os.path.join(folder, "Negligence Essay.md")
+        body = "# Duty\n\nThe neighbour principle.\n[^1]: not counted at all\n[^2]: also hidden\n"
+        with open(note, "w") as f:
+            f.write(body)
+        lines = body.splitlines()
+        start = lawnotes.body_words(lines)
+        edited = lines[:]
+        edited[2] += " here"
+        grown = lawnotes.body_words(edited)
+        self.assertGreater(grown, start)
+        at = lambda n: lawnotes.essay_status(n, 2000, 2)[0]
+        over = lawnotes.essay_status(grown, 2, 2)[0]
+        s = Session(note, size=(40, 40))
+        try:
+            # Minutes given: the exam, exactly as before. Blank is not offered once it has started.
+            self.assertIn("Minutes (blank for word limit): ", s.keys(b"\x1bx", 0.5))
+            self.assertNotIn("Word limit for this note", s.keys(b"\x1b", 0.4))
+            s.keys(b"\x1bx", 0.4)
+            self.assertIn("number", s.keys(b"nope\r", 0.4))
+            self.assertIn("Word limit (blank for none): ", s.keys(b"45\r", 0.4))
+            screen = s.keys(b"\r", 0.5)
+            self.assertRegex(screen, r"4[45]:[0-5]\d")
+            self.assertNotIn("// Word limit", screen)
+            self.assertNotIn("/2,000", screen)
+            self.assertIn("Stop the exam", s.keys(b"\x1bx", 0.4))
+            s.keys(b"y", 0.4)
+
+            # Blank minutes: a limit on this note. Esc writes nothing.
+            self.assertIn("Word limit for this note: ", s.keys(b"\x1bx\r", 0.5))
+            self.assertNotIn("// Word limit", s.keys(b"\x1b", 0.4))
+            s.keys(b"\x1bx\r", 0.4)
+            self.assertIn("2,000", s.keys(b"nope\r", 0.4))
+            screen = s.keys(b"2,000\r", 0.6)
+            self.assertIn("// Word limit 2,000", screen)
+            self.assertIn(at(start), screen)
+            self.assertNotIn("Negligence Essay.md", screen)  # 40 columns: the count stays, the name goes
+            self.assertNotIn(b"48;5;160", s.out)
+            self.assertRegex(s.keys(b"\x1b[B\x1b[B\x05 here", 0.5), rf"\b{grown}\b")
+
+            # Already has a limit: change, or a timed exam, or remove. Esc leaves it.
+            self.assertIn("c change · r remove · e exam", s.keys(b"\x1bx", 0.5))
+            self.assertIn("New word limit: ", s.keys(b"\x1bxc", 0.5))
+            s.keys(b"\x1b", 0.3)  # Esc leaves the limit
+            self.assertIn("c change · r remove · e exam", s.keys(b"\x1bx", 0.4))
+            s.keys(b"c", 0.3)
+            self.assertIn("number", s.keys(b"nope\r", 0.4))
+            screen = s.keys(b"2\r", 0.5)
+            self.assertIn(lawnotes.essay_status(grown, 2, 2)[1], screen)  # past the limit, in the warning colour
+            self.assertNotIn("// Word limit 2,000", screen)
+            self.assertIn(b"48;5;160", s.out)
+
+            # A running exam replaces the essay count. Its minutes still reject a blank line.
+            self.assertIn("c change · r remove · e exam", s.keys(b"\x1bx", 0.4))
+            self.assertIn("Minutes (e.g. 90): ", s.keys(b"e", 0.4))
+            screen = s.keys(b"\r", 0.4)
+            self.assertIn("number", screen)
+            self.assertNotIn("Word limit for this note", screen)
+            s.keys(b"90\r", 0.4)
+            screen = s.keys(b"\r", 0.5)
+            self.assertRegex(screen, r"1:(30:00|29:5\d)")
+            self.assertNotIn(over, screen)
+            self.assertIn("Stop the exam", s.keys(b"\x1bx", 0.4))
+            screen = s.keys(b"y", 0.5)
+            self.assertIn("Exam stopped", screen)
+            # The warning colour is painted in a second pass, so the raw stream has a gap
+            # between the count and the footnote tail.
+            self.assertRegex(screen, r"5/2 words\s+·\s*2 fn")
+
+            self.assertIn("r remove", s.keys(b"\x1bx", 0.4))
+            screen = s.keys(b"r", 0.5)
+            self.assertIn("Word limit removed", screen)
+            self.assertNotIn(over, screen)
+            screen = s.keys(b"\x1a", 0.5)  # undo puts the line back; it is part of the note
+            self.assertRegex(screen, r"5/2 words\s+·\s*2 fn")
+            self.assertTrue(s.quit())
+        finally:
+            try:
+                os.kill(s.pid, 9)
+            except OSError:
+                pass
+            try:
+                os.waitpid(s.pid, 0)
+            except OSError:
+                pass
+        with open(note) as f:
+            saved = f.read()
+        self.assertTrue(saved.startswith("// Word limit 2\n"), saved)
+        self.assertIn("The neighbour principle. here\n", saved)
+        self.assertIn("[^1]: not counted at all\n", saved)
+        self.assertIn("[^2]: also hidden\n", saved)
+        self.assertEqual(saved.count("Word limit"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
