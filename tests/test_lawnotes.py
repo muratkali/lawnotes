@@ -2447,7 +2447,14 @@ class RevisionPackTests(unittest.TestCase):
             ("Old/Deep", "/n/Tort/Old/Deep.md"),
         ])
         self.assertEqual(lawnotes.pack_export_name("Tort"), "Tort revision pack")
-        self.assertEqual(lawnotes.pack_export_name("Tort/Duty"), "Tort-Duty revision pack")
+        self.assertEqual(lawnotes.pack_export_name("Tort/Duty"), "Tort › Duty revision pack")
+        self.assertEqual(lawnotes.pack_export_name("Tort/Duty/Breach"), "Tort › Duty › Breach revision pack")
+        self.assertNotEqual(lawnotes.pack_export_name("Tort/Duty"), lawnotes.pack_export_name("Tort-Duty"))
+        self.assertEqual(lawnotes.pack_export_name("Tort: Duty"), "Tort: Duty revision pack")
+        self.assertEqual(lawnotes.pack_export_name("Tort›Duty"), "Tort›Duty revision pack")
+        self.assertEqual(lawnotes.pack_export_name("\x01"), "Notes revision pack")
+        md = lawnotes.revision_pack_markdown([("Offer", ["An offer."])], "Tort/Duty", self.WHEN)
+        self.assertIn('title: "Tort › Duty"', md)
         folder = os.path.join(lawnotes.NOTES_DIR, "PackOrder")
         os.makedirs(os.path.join(folder, "Sub"), exist_ok=True)
         for name, when in (("Week 10.md", 1_000_000_000), ("Sub/Mid.md", 1_100_000_000), ("Week 2.md", 1_200_000_000)):
@@ -2484,10 +2491,11 @@ class RevisionPackTests(unittest.TestCase):
                        "[^1]: Neighbour principle."]),
             ("Acceptance", ["R v Brown.[^1]", "", "[^1]: Postal rule.", "// Fake v Case [1999] AC 1"]),
         ]
-        path = lawnotes.export_revision_pack("Tort", notes, "docx", tables=True, when=self.WHEN)
-        self.assertEqual(os.path.basename(path), "Tort revision pack.docx")
+        path = lawnotes.export_revision_pack("Tort/Duty", notes, "docx", tables=True, when=self.WHEN)
+        self.assertEqual(os.path.basename(path), "Tort › Duty revision pack.docx")
         z = zipfile.ZipFile(path)
         doc, notes_xml = z.read("word/document.xml").decode(), z.read("word/footnotes.xml").decode()
+        self.assertIn("Tort › Duty", doc)
         self.assertIn("22 October 2026", doc)
         self.assertIn("Contents", doc)
         self.assertIn("Table of Cases", doc)
@@ -2505,6 +2513,13 @@ class RevisionPackTests(unittest.TestCase):
         self.assertNotIn("Fake v Case", doc)
         self.assertNotIn("page-break-before", doc)   # the HTML break is not written into Word
         self.assertIn("Times New Roman", z.read("word/styles.xml").decode())
+
+    @unittest.skipUnless(lawnotes.find_tool("pandoc"), "export needs pandoc (brew install pandoc)")
+    def test_colon_folder_exports_as_a_word_document(self):
+        import zipfile
+        path = lawnotes.export_revision_pack("Tort: Duty", [("Offer", ["An offer."])], "docx", when=self.WHEN)
+        self.assertEqual(os.path.basename(path), "Tort: Duty revision pack.docx")
+        self.assertIn("Tort: Duty", zipfile.ZipFile(path).read("word/document.xml").decode())
 
     def test_menu_at_forty_columns_exports_the_folder(self):
         folder = os.path.join(lawnotes.NOTES_DIR, "RevPack")

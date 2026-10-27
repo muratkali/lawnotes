@@ -1727,11 +1727,15 @@ def note_folder(path):
     return rel.rpartition("/")[0] or None
 
 
-def pack_export_name(folder):
-    """'Tort revision pack'. A slash isn't allowed in a file name, so Tort/Duty becomes Tort-Duty."""
-    name = folder.replace("/", "-").replace(os.sep, "-")
+def pack_folder_name(folder):
+    """A folder path for a pack title or file name: Tort/Duty becomes Tort › Duty."""
+    name = folder.replace("/", " › ").replace(os.sep, " › ")
     name = re.sub(r"[\x00-\x1f]", "", name).strip()
-    return (name or "Notes") + " revision pack"
+    return name or "Notes"
+
+
+def pack_export_name(folder):
+    return pack_folder_name(folder) + " revision pack"
 
 
 def revision_pack_markdown(notes, folder, when=None, tables=False):
@@ -1742,7 +1746,7 @@ def revision_pack_markdown(notes, folder, when=None, tables=False):
     The title and date are metadata: pandoc prints them, then the contents, then this body."""
     when = when or datetime.date.today()
     parts = ["---",
-             "title: " + yaml_quote(folder),
+             "title: " + yaml_quote(pack_folder_name(folder)),
              "date: " + yaml_quote(british_date(when)),
              'toc-title: "Contents"',
              "---",
