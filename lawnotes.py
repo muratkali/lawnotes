@@ -1903,7 +1903,7 @@ def read_progress(path, strict=False):
             return cards
     except FileNotFoundError:
         return {}
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, RecursionError):
         pass
     return None if strict else {}
 
@@ -1915,8 +1915,8 @@ def progress_copies():
         names = os.listdir(folder)
     except OSError:
         return []
-    return [os.path.join(folder, n) for n in sorted(names)
-            if n != base and n.startswith(base[:-5]) and n.endswith(".json")]
+    pattern = re.compile(re.escape(base[:-5]) + r" (?:[2-9]|[1-9][0-9]+)\.json")
+    return [os.path.join(folder, n) for n in sorted(names) if pattern.fullmatch(n)]
 
 
 def load_progress():
@@ -2227,7 +2227,7 @@ HELP = [
     ("Option+K", "Check this note for likely OSCOLA slips. Enter jumps to one; f fixes a mechanical slip and refreshes the list. F9 does the same."),
     ("^L", "Outline: jump to any heading or case in this note."),
     ("#", "Revising"),
-    ("Option+C", "Revision cards from your notes: each case brief (^T) is a card (the case and citation on the front, the brief on the back), and so is a bullet that names a case and says something about it. Choose this note, its folder or all notes. Space shows the answer; then 1 again, 2 hard, 3 good. Cards come back after 1, 3, 7, 14, 30, then 60 days; due cards first, then new ones. Esc ends. Progress is kept in UCL Notes, so every Mac shares it. F7 does the same."),
+    ("Option+C", "Revision cards from your notes: each case brief (^T) is a card (the case and citation on the front, the brief on the back), and so is a bullet that names a case and says something about it. Choose this note, its folder or all notes. Space shows the answer; then 1 again, 2 hard, 3 good. Cards come back after 1, 3, 7, 14, 30, then 60 days; due cards first, then new ones. Esc ends. Progress is kept in UCL Notes, so every Mac shares it. Only numbered iCloud conflict copies are merged; other similarly named files are left alone. If progress cannot be read, a rating is not saved and the status bar warns you. F7 does the same."),
     ("Option+X", "Exam mode for a timed essay or problem question. It asks how many minutes, then a word limit (leave the limit blank for none); Esc cancels either. The status bar shows the time left and the words in the note, or after the end how long since (Time's up). The count is the body only: // comments, footnote lines ([^1]: …) and Markdown markers are left out — headings, bullets, *italic*, **bold**, ==highlights==, `code`, links and [^1] references. The words a link shows are counted. It tells you once at 10 minutes and once at 5. Past the limit the count uses the theme's warning colour. You can keep writing the whole time. Option+X again asks whether to stop. Closing the pane or quitting ends it. F8 does the same."),
     ("#", "Moving around"),
     ("^F", "Find. Press ^F and Enter again (or F3) for the next match; Esc clears the highlight."),
@@ -3779,7 +3779,17 @@ class App:
         if queue:
             msg += f" · {len(queue)} left"
         if failed:
-            msg += f" · PROGRESS NOT SAVED ({failed})"
+            _, left_x, _, width = self.pane.rect
+            screen_width = self.scr.getmaxyx()[1]
+            barw = width - (1 if left_x + width >= screen_width else 0)
+            full = msg + " · PROGRESS NOT SAVED"
+            short = "PROGRESS NOT SAVED; file left alone"
+            if len(full) + 1 <= barw:
+                msg = full
+            elif len(short) + 1 <= barw:
+                msg = short
+            else:
+                msg = "PROGRESS NOT SAVED"
         self.say(msg, 12)
 
     def draw_card(self, card, shown, top, where, new):
