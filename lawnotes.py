@@ -2043,7 +2043,10 @@ def read_progress(path, strict=False):
     try:
         with open(path, encoding="utf-8") as f:
             cards = json.load(f).get("cards")
-        if isinstance(cards, dict):
+        # schedule() writes flat records; nested values can outgrow the JSON encoder's stack.
+        if (isinstance(cards, dict)
+                and all(isinstance(rec, dict) and all(type(v) in (str, int, float, bool, type(None))
+                                                  for v in rec.values()) for rec in cards.values())):
             return cards
     except FileNotFoundError:
         return {}
@@ -2085,10 +2088,12 @@ def save_progress(updates):
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, REVISION_FILE)
-    except OSError:
+    except (OSError, RecursionError, ValueError) as e:
         with contextlib.suppress(OSError):
             os.remove(tmp)
-        raise
+        if isinstance(e, OSError):
+            raise
+        raise OSError(errno.EIO, "your saved progress couldn't be written, so it was left as it is") from e
     for p in copies:
         with contextlib.suppress(OSError):
             os.remove(p)

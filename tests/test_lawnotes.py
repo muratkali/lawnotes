@@ -854,6 +854,38 @@ class RevisionTests(unittest.TestCase):
         with open(path) as f:
             self.assertEqual(f.read(), data)
 
+    def test_progress_records_have_scalar_values(self):
+        path = lawnotes.REVISION_FILE
+        good = {"box": 1, "due": "2026-10-27", "at": 10.5, "reviews": 2}
+        with open(path, "w") as f:
+            json.dump({"version": 1, "cards": {"case": good}}, f)
+        self.assertEqual(lawnotes.read_progress(path, strict=True), {"case": good})
+        for bad in ({"box": [1]}, {"at": {"nested": 10}}, ["not a record"]):
+            with self.subTest(record=bad):
+                data = json.dumps({"version": 1, "cards": {"case": bad}})
+                with open(path, "w") as f:
+                    f.write(data)
+                self.assertIsNone(lawnotes.read_progress(path, strict=True))
+                self.assertEqual(lawnotes.read_progress(path), {})
+                with self.assertRaises(OSError):
+                    lawnotes.save_progress({"rated": {"box": 1, "at": 40.0}})
+                with open(path) as f:
+                    self.assertEqual(f.read(), data)
+
+    def test_progress_dump_errors_keep_original_and_remove_temp(self):
+        path = lawnotes.REVISION_FILE
+        data = '{"version":1,"cards":{"case":{"box":1,"at":10.0}}}'
+        with open(path, "w") as f:
+            f.write(data)
+        for error in (RecursionError("too deep"), ValueError("bad value")):
+            with self.subTest(error=type(error).__name__):
+                with mock.patch.object(lawnotes.json, "dump", side_effect=error):
+                    with self.assertRaises(OSError):
+                        lawnotes.save_progress({"rated": {"box": 1, "at": 40.0}})
+                with open(path) as f:
+                    self.assertEqual(f.read(), data)
+                self.assertFalse(os.path.exists(path + ".saving~"))
+
     def test_history_leaves_progress_out(self):
         self.assertIn(".*", lawnotes.HISTORY_EXCLUDE.split("\n"))
         os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
@@ -1445,6 +1477,14 @@ class Session:
         self.out += out
         return re.sub(rb"\x1b\[[0-9;?<>]*[A-Za-z~]|\x1b\(B|\x1b[=>]", b" ", out).decode(errors="replace")
 
+    def keys_until(self, data, expected, seconds=3):
+        """Send keys, then keep reading until the expected screen text appears or time runs out."""
+        out = self.keys(data, 0.1)
+        deadline = time.monotonic() + seconds
+        while expected not in out and time.monotonic() < deadline:
+            out += self.keys(b"", 0.1)
+        return out
+
     def quit(self, seconds=8):
         """^Q, then wait for the editor to exit; kill it and return False if it doesn't. The exit
         snapshots the shared test notes folder, which grows as the suite runs: hence the time."""
@@ -1976,9 +2016,9 @@ class SessionTests(unittest.TestCase):
         s = Session(c)
         s.keys(b"\x1bd", 0.8)
         s.keys(b"\x1b", 0.5)                           # Esc: keep the same note in the new pane
-        s.keys(b"X", 0.3)
+        self.assertIn("X#", s.keys_until(b"X", "X#"))
         s.keys(b"\x1bo", 0.3)
-        s.keys(b"\x05Y", 0.3)                          # left pane: end of line, type
+        self.assertIn("CY", s.keys_until(b"\x05Y", "CY"))  # left pane: end of line, type
         self.assertTrue(s.quit())
         self.assertEqual(open(c).read(), "X# CY\n")    # both edits, one text
         self.assertEqual(os.listdir(folder), ["C.md"])  # no conflict copies
@@ -2987,10 +3027,10 @@ class ExportSafetyTests(unittest.TestCase):
                 before = real_lstat(first)
                 changed = False
 
-                def late_stat(path):
+                def late_stat(path, *args, **kwargs):
                     nonlocal changed
-                    old = real_lstat(path)
-                    if path == first and not changed:
+                    old = real_lstat(path, *args, **kwargs)
+                    if path == first and not args and not kwargs and not changed:
                         changed = True
                         if kind == "inode":
                             replacement = os.path.join(self.out, "replacement")
@@ -3429,10 +3469,12 @@ class EssayModeTests(unittest.TestCase):
             self.assertRegex(s.keys(b"\x1b[B\x1b[B\x05 here", 0.5), rf"\b{grown}\b")
 
             # Already has a limit: change, or a timed exam, or remove. Esc leaves it.
-            self.assertIn("c change · r remove · e exam", s.keys(b"\x1bx", 0.5))
+            self.assertIn("c change · r remove · e exam",
+                          s.keys_until(b"\x1bx", "c change · r remove · e exam"))
             self.assertIn("New word limit: ", s.keys(b"\x1bxc", 0.5))
             s.keys(b"\x1b", 0.3)  # Esc leaves the limit
-            self.assertIn("c change · r remove · e exam", s.keys(b"\x1bx", 0.4))
+            self.assertIn("c change · r remove · e exam",
+                          s.keys_until(b"\x1bx", "c change · r remove · e exam"))
             s.keys(b"c", 0.3)
             self.assertIn("number", s.keys(b"nope\r", 0.4))
             screen = s.keys(b"2\r", 0.5)
@@ -3441,7 +3483,8 @@ class EssayModeTests(unittest.TestCase):
             self.assertIn(b"48;5;160", s.out)
 
             # A running exam replaces the essay count. Its minutes still reject a blank line.
-            self.assertIn("c change · r remove · e exam", s.keys(b"\x1bx", 0.4))
+            self.assertIn("c change · r remove · e exam",
+                          s.keys_until(b"\x1bx", "c change · r remove · e exam"))
             self.assertIn("Minutes (e.g. 90): ", s.keys(b"e", 0.4))
             screen = s.keys(b"\r", 0.4)
             self.assertIn("number", screen)
