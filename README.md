@@ -59,7 +59,7 @@ lawnotes --export Tort/Essay docx --tables
 
 The last word is `docx` or `pdf`. Each file is saved to `~/Downloads`.
 
-Exports go to Downloads. The status bar names the file and says why when it is not a plain replacement. Law Notes replaces an unchanged export of its own. If a file was edited, or its export record is missing, it keeps that file and saves the new one as `Name (2).docx` (then `(3)` and so on); the editor shows the name and why.
+Law Notes replaces an unchanged export of its own. If a file was edited, or its export record is missing, it keeps that file and saves the new one as `Name (2).docx` (then `(3)` and so on); the editor shows the name and why.
 
 For essays and coursework, choose "with tables of cases and legislation" (or add `--tables`): an OSCOLA Table of Cases and Table of Legislation go after the title (the first `# ` heading), built from the case names, citations, Acts and EU treaty articles in the note, with a page break before the note itself in Word.
 
@@ -74,7 +74,7 @@ Option+X (or F8) has two modes. It asks for the minutes first; Esc cancels any q
 **Exam mode** is a timed essay or problem question. Give the minutes, then a word limit (leave the limit blank for none).
 
 - The status bar shows the time left and the words in the note. After the end it shows how long since (Time's up). You can keep writing the whole time.
-- The count is the body only. `//` comments, footnote lines (`[^1]: …`) and Markdown markers are left out. Headings, bullets, *italic*, **bold**, `==highlights==`, `code`, links and `[^1]` references are counted by the words they show.
+- The count is the body only. `//` comments and footnote lines (`[^1]: …`) are left out. So are Markdown markers (headings, bullets, *italic*, **bold**, `==highlights==`, `code`) and `[^1]` references. A link counts as the words it shows.
 - You are told once at 10 minutes left and once at 5.
 - Past the limit the count uses the theme's warning colour, the same as a misspelt word.
 - Option+X again asks whether to stop. Closing the pane or quitting also ends it.
