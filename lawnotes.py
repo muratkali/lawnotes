@@ -60,6 +60,7 @@ import threading
 import time
 import traceback
 import unicodedata
+from collections import namedtuple
 from functools import lru_cache
 
 VERSION = "1.6.0"
@@ -2474,6 +2475,52 @@ SELECT_MOVES = {curses.KEY_SLEFT: curses.KEY_LEFT, curses.KEY_SRIGHT: curses.KEY
                 curses.KEY_SPREVIOUS: curses.KEY_PPAGE, curses.KEY_SNEXT: curses.KEY_NPAGE,
                 "sel-word-left": "word-left", "sel-word-right": "word-right"}
 BACKSPACE = ("\x7f", "\x08", curses.KEY_BACKSPACE)
+
+
+Command = namedtuple("Command", "keys method label shortcut args", defaults=("", "", ()))
+# A key that does one thing. keys: every key (control character, name or F-key) that triggers it, the
+# first being what the right-click menu queues. method: the App method _handle calls with args; None when
+# _handle does it as explicit code (it keeps the selection, cuts, undoes, ...) and the entry is there for
+# the menu. label and shortcut: the right-click menu's text.
+COMMANDS = [
+    Command(("\x16",), "paste_clipboard", "Paste", "^V"),
+    Command(("\x18",), None, "Cut", "^X"),
+    Command(("\x03",), None, "Copy", "^C"),
+    Command(("highlight",), None, "Highlight word", "Option+H"),
+    Command(("\x1a",), None, "Undo", "^Z"),
+    Command(("\x19",), None, "Redo", "^Y"),
+    Command(("split-right",), "split", "Split side by side", "Option+D", ("v",)),
+    Command(("split-down",), "split", "Split one above the other", "Option+Shift+D", ("h",)),
+    Command(("next-pane",), "next_pane", "Next pane", "Option+O"),
+    Command(("close-pane",), "close_pane", "Close this pane", "Option+W"),
+    Command(("links",), "links", "Notes linking here", "Option+L"),
+    Command(("replace", curses.KEY_F4), "replace", "Replace…", "Option+R"),
+    Command(("cards", curses.KEY_F7), "revise", "Revision cards…", "Option+C"),
+    Command(("todos", curses.KEY_F10), "todos", "Open to-dos…", "Option+J"),
+    Command(("oscola", curses.KEY_F9), "check_oscola", "Check OSCOLA…", "Option+K"),
+    Command(("exam", curses.KEY_F8), None, "Exam…", "Option+X"),
+    Command(("abbreviations",), "edit_abbreviations", "Abbreviations…", "Option+A"),
+    Command(("export", curses.KEY_F5), "export", "Export…", "Option+E"),
+    Command(("themes", curses.KEY_F6), "choose_theme", "Themes…", "Option+T"),
+    Command(("\x10",), "search_all"),
+    Command(("\x02",), "case_index"),
+    Command(("\x12",), "history_menu"),
+    Command(("\x0f",), "open_picker"),
+    Command(("\x0e",), "new_note"),
+    Command(("\x06",), "find"),
+    Command(("\x07", curses.KEY_F1), "show_help"),
+    Command(("\x17",), "fix_spelling"),
+    Command(("\x14",), "insert_template"),
+    Command(("\x0c",), "outline"),
+]
+COMMAND_BY_KEY = {key: c for c in COMMANDS for key in c.keys}
+CALLS = {key: c for key, c in COMMAND_BY_KEY.items() if c.method}  # the keys _handle just calls a method for
+
+
+def command_item(key, label=None):
+    """A right-click menu item for the command on key: (label, shortcut, keys to queue)."""
+    c = COMMAND_BY_KEY[key]
+    return (label or c.label, c.shortcut, [c.keys[0]])
 
 
 class App:
@@ -5062,23 +5109,19 @@ class App:
             items += [(f"Add “{word}” to dictionary", "", ("learn", word)),
                       (f"Ignore “{word}”", "", ("ignore", word)), None]
         if sel:
-            items += [("Cut", "^X", ["\x18"]), ("Copy", "^C", ["\x03"]), ("Paste", "^V", ["\x16"]), None,
+            items += [command_item("\x18"), command_item("\x03"), command_item("\x16"), None,
                       ("Highlight", "=", ["="]), ("Italic", "*", ["*"]), ("Bold", "**", ["*", "*"])]
         else:
-            items += [("Paste", "^V", ["\x16"]), ("Select word", "double-click", ("select-word",)),
-                      ("Highlight word", "Option+H", ["highlight"])]
-        items += [None, ("Undo", "^Z", ["\x1a"]), ("Redo", "^Y", ["\x19"]), None,
-                  ("Split side by side", "Option+D", ["split-right"]),
-                  ("Split one above the other", "Option+Shift+D", ["split-down"])]
+            items += [command_item("\x16"), ("Select word", "double-click", ("select-word",)),
+                      command_item("highlight")]
+        items += [None, command_item("\x1a"), command_item("\x19"), None,
+                  command_item("split-right"), command_item("split-down")]
         if len(list(self.panes())) > 1:
-            items += [("Next pane", "Option+O", ["next-pane"]), ("Close this pane", "Option+W", ["close-pane"])]
-        items += [None, ("Open linked note" if self.link_at() else "Notes linking here", "Option+L", ["links"]),
-                  ("Replace…", "Option+R", ["replace"]), ("Revision cards…", "Option+C", ["cards"]),
-                  ("Open to-dos…", "Option+J", ["todos"]),
-                  ("Check OSCOLA…", "Option+K", ["oscola"]),
-                  ("Stop exam" if self.pane.exam else "Exam…", "Option+X", ["exam"]),
-                  ("Abbreviations…", "Option+A", ["abbreviations"]),
-                  ("Export…", "Option+E", ["export"]), ("Themes…", "Option+T", ["themes"])]
+            items += [command_item("next-pane"), command_item("close-pane")]
+        items += [None, command_item("links", "Open linked note" if self.link_at() else None),
+                  command_item("replace"), command_item("cards"), command_item("todos"), command_item("oscola"),
+                  command_item("exam", "Stop exam" if self.pane.exam else None),
+                  command_item("abbreviations"), command_item("export"), command_item("themes")]
         H, W = self.scr.getmaxyx()
         if len(items) + 2 > H - 1:  # a short pane: no separators, and only what fits
             items = [it for it in items if it][:max(1, H - 3)]
@@ -5306,57 +5349,13 @@ class App:
             keep_selection = True
         elif key == "\x18":
             self.copy(cut=True)
-        elif key == "\x16":
-            self.paste_clipboard()
-        elif key == "\x10":
-            self.search_all()
-        elif key == "\x02":
-            self.case_index()
-        elif key in ("todos", curses.KEY_F10):
-            self.todos()
-        elif key == "\x12":
-            self.history_menu()
-        elif key == "\x0f":
-            self.open_picker()
-        elif key == "\x0e":
-            self.new_note()
-        elif key == "\x06":
-            self.find()
-        elif key in ("\x07", curses.KEY_F1):
-            self.show_help()
+        elif key in CALLS:  # one key, one call
+            getattr(self, CALLS[key].method)(*CALLS[key].args)
         elif key == curses.KEY_F3:
             self.find(again=True)
-        elif key in ("replace", curses.KEY_F4):
-            self.replace()
-        elif key == "\x17":
-            self.fix_spelling()
-        elif key == "\x14":
-            self.insert_template()
-        elif key == "split-right":
-            self.split("v")
-        elif key == "split-down":
-            self.split("h")
-        elif key == "close-pane":
-            self.close_pane()
-        elif key == "next-pane":
-            self.next_pane()
-        elif key in ("export", curses.KEY_F5):
-            self.export()
-        elif key in ("themes", curses.KEY_F6):
-            self.choose_theme()
-        elif key == "abbreviations":
-            self.edit_abbreviations()
-        elif key in ("cards", curses.KEY_F7):
-            self.revise()
-        elif key in ("oscola", curses.KEY_F9):
-            self.check_oscola()
         elif key in ("exam", curses.KEY_F8):
             self.exam_mode()
             keep_selection = self.anchor is not None  # setting or clearing a limit keeps the selection
-        elif key == "links":
-            self.links()
-        elif key == "\x0c":
-            self.outline()
         elif key == "\x0b":
             if self.selection():
                 self.copy(cut=True)
