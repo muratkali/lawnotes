@@ -3572,5 +3572,105 @@ class EssayModeTests(unittest.TestCase):
         self.assertEqual(saved.count("Word limit"), 1)
 
 
+class KeyTableTests(unittest.TestCase):
+    TOP = "┌" + "─" * 44 + "┐"
+    BOTTOM = "└" + "─" * 44 + "┘"
+    LINE = "├" + "─" * 44 + "┤"
+    # The rows of today's right-click menu, as drawn (label left, shortcut right).
+    UNDO_REDO = [" Undo                                    ^Z ", " Redo                                    ^Y ", LINE]
+    SPLITS = [" Split side by side                Option+D ", " Split one above the other   Option+Shift+D "]
+    PANES = [" Next pane                         Option+O ", " Close this pane                   Option+W "]
+    NOTES = [" Replace…                          Option+R ", " Revision cards…                   Option+C ",
+             " Open to-dos…                      Option+J ", " Check OSCOLA…                     Option+K "]
+    TAIL = [" Abbreviations…                    Option+A ", " Export…                           Option+E ",
+            " Themes…                           Option+T ", BOTTOM]
+    PLAIN = [TOP, " Paste                                   ^V ", " Select word                   double-click ",
+             " Highlight word                    Option+H ", LINE] + UNDO_REDO + SPLITS
+    LINKS = " Notes linking here                Option+L "
+    EXAM = " Exam…                             Option+X "
+
+    def menu(self, selected=False, panes=1, exam=None, link=None, pick=0):
+        """Open the right-click menu on a bare App: the rows it draws, and the keys the pick-th choice queues."""
+        app = lawnotes.App.__new__(lawnotes.App)
+        app.buf = lawnotes.Buffer(os.path.join(TMP, "key-table.md"))
+        app.buf.lines = ["hello world"]
+        app.pane = lawnotes.Pane()
+        app.pane.exam = exam
+        app.queued, app.anchor = [], None
+        app.selection = lambda: selected
+        app.panes = lambda: [None] * panes
+        app.link_at = lambda: link
+        app.misspelt = lambda line: []
+        app.scr = mock.Mock(getmaxyx=lambda: (40, 100))
+        app.A = {"bar": 0, "key": 1}
+        drawn = []
+        app.draw = drawn.clear
+        app.refresh = lambda: None
+        app.put = lambda y, x, text, attr=0: drawn.append(text)
+        keys = iter([lawnotes.curses.KEY_DOWN] * pick + ["\n"])
+        app.get_key = lambda: next(keys)
+        app.normalise = lambda key: key
+        with mock.patch("curses.curs_set"):
+            app.context_menu(5, 5)
+        return [row for row in drawn if row != "│"], app.queued
+
+    def test_every_command_names_a_real_method(self):
+        for c in lawnotes.COMMANDS:
+            if c.method:
+                self.assertTrue(callable(getattr(lawnotes.App, c.method, None)), c)
+
+    def test_no_key_appears_twice(self):
+        keys = [key for c in lawnotes.COMMANDS for key in c.keys]
+        self.assertEqual(sorted(map(repr, keys)), sorted(map(repr, set(keys))))
+
+    def test_keys_call_their_methods(self):
+        app = lawnotes.App.__new__(lawnotes.App)
+        for key, method, args in [("\x16", "paste_clipboard", ()), (lawnotes.curses.KEY_F9, "check_oscola", ()),
+                                  ("split-down", "split", ("h",)), ("\x07", "show_help", ())]:
+            with self.subTest(key=key):
+                app.buf, app.anchor, app.cutting, app.flash = lawnotes.Buffer(os.path.join(TMP, "k.md")), None, False, 1
+                app.normalise = lambda k: k
+                with mock.patch.object(lawnotes.App, method) as called:
+                    app._handle(key)
+                called.assert_called_once_with(*args)
+
+    def test_menu_with_nothing_selected(self):
+        rows, _ = self.menu()
+        self.assertEqual(rows, self.PLAIN + [self.LINE, self.LINKS] + self.NOTES + [self.EXAM] + self.TAIL)
+
+    def test_menu_with_text_selected(self):
+        rows, _ = self.menu(selected=((0, 0), (0, 5)))
+        self.assertEqual(rows, [
+            self.TOP, " Cut                                     ^X ", " Copy                                    ^C ",
+            " Paste                                   ^V ", self.LINE,
+            " Highlight                                = ", " Italic                                   * ",
+            " Bold                                    ** ", self.LINE] + self.UNDO_REDO + self.SPLITS
+            + [self.LINE, self.LINKS] + self.NOTES + [self.EXAM] + self.TAIL)
+
+    def test_menu_with_two_panes(self):
+        rows, _ = self.menu(panes=2)
+        self.assertEqual(rows, self.PLAIN + self.PANES + [self.LINE, self.LINKS] + self.NOTES + [self.EXAM] + self.TAIL)
+
+    def test_menu_while_an_exam_runs(self):
+        rows, _ = self.menu(exam=object())
+        self.assertEqual(rows, self.PLAIN + [self.LINE, self.LINKS] + self.NOTES
+                         + [" Stop exam                         Option+X "] + self.TAIL)
+
+    def test_menu_on_a_link(self):
+        rows, _ = self.menu(link="Tort/Duty")
+        self.assertEqual(rows, self.PLAIN + [self.LINE, " Open linked note                  Option+L "]
+                         + self.NOTES + [self.EXAM] + self.TAIL)
+
+    def test_menu_choices_queue_these_keys(self):
+        every = [self.menu(panes=2, pick=i)[1] for i in (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)]
+        self.assertEqual(every, [
+            ["\x16"], ["highlight"], ["\x1a"], ["\x19"], ["split-right"], ["split-down"], ["next-pane"], ["close-pane"],
+            ["links"], ["replace"], ["cards"], ["todos"], ["oscola"], ["exam"], ["abbreviations"], ["export"],
+            ["themes"]])
+        selected = ((0, 0), (0, 5))
+        self.assertEqual([self.menu(selected=selected, pick=i)[1] for i in range(6)],
+                         [["\x18"], ["\x03"], ["\x16"], ["="], ["*"], ["*", "*"]])
+
+
 if __name__ == "__main__":
     unittest.main()
