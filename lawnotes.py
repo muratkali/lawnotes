@@ -63,7 +63,7 @@ import unicodedata
 from collections import namedtuple
 from functools import lru_cache
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 HELP_TITLE = "Help — Law Notes (beta)"
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
 NOTES_DIR = os.path.abspath(os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes")))

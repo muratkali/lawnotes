@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.6.1
+
+- Tab case completion and the case index (^B) no longer reread every note after each edit: only notes that changed are scanned again.
+- The help screen (^G) is shorter: the long entries for Option+X, Option+R, Option+C and Option+E are now a few lines each, and the detail is in the README.
+- The bottom hint bar also lists Export, Cards, To-dos, OSCOLA and Exam, in windows wide enough to show them.
+- `lawnotes --abbreviations` creates a new abbreviations file with the same header and defaults as Option+A.
+- README: commands in code blocks no longer carry `#` comments, which zsh passes to the command when pasted.
+- Tests wait for the editor to go quiet instead of for fixed times: the suite takes about a minute and a half instead of six.
+
 ## 1.6.0
 
 - Revision cards (Option+C or F7): each case brief becomes a card (the case and citation on the front, the brief on the back), and so does a bullet that names a case and says something about it. Choose this note, its folder or all notes; Space shows the answer, then 1 again, 2 hard, 3 good. Cards due come first and come back after 1, 3, 7, 14, 30, then 60 days. Progress is kept in UCL Notes → .revision.json, so every Mac shares it, and revising on two Macs before iCloud syncs loses nothing.
