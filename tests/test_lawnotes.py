@@ -1477,7 +1477,10 @@ class Session:
                     last = time.monotonic()
         return out
 
+    LONE_ESC_QUIET = 4 * lawnotes.ESCAPE_WAIT / 1000
+
     def keys(self, data, seconds=0.4):
+        lone_esc = data.endswith(b"\x1b")  # the editor must time this Esc out before more keys come
         # Write only as fast as the editor reads: a full terminal input buffer must never block the
         # test forever (an editor that stops reading fails the test, showing what it was doing).
         deadline = time.time() + 30
@@ -1500,8 +1503,14 @@ class Session:
         if seconds < 0.05:
             out = self.read(seconds)  # fire and forget (the fuzz test)
         else:
-            # a lone Esc is only resolved by the editor after ESCAPE_WAIT (250 ms)
+            written = time.monotonic()
             out = self.settle(seconds)
+            if lone_esc:
+                # The editor resolves a lone Esc only after ESCAPE_WAIT (250 ms) of silence. If the
+                # next keys arrive sooner (a slow runner), ESC + ESC x is read as one Option+x and
+                # the Esc is lost. So keep the line quiet for several ESCAPE_WAIT before returning,
+                # whatever `seconds` was, still collecting what the editor draws meanwhile.
+                out += self.read(max(0, written + self.LONE_ESC_QUIET - time.monotonic()))
         self.out += out
         return re.sub(rb"\x1b\[[0-9;?<>]*[A-Za-z~]|\x1b\(B|\x1b[=>]", b" ", out).decode(errors="replace")
 
