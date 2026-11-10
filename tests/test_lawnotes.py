@@ -1423,11 +1423,11 @@ class ExamTests(unittest.TestCase):
         nxt = next(i for i, (k, d) in enumerate(lawnotes.HELP) if i > rev and k == "#")
         text = dict(lawnotes.HELP[rev:nxt])["Option+X"]
         self.assertIn("F8", text)
-        self.assertIn("//", text)
-        self.assertIn("[^1]", text)
-        self.assertIn("Markdown", text)
-        self.assertIn("warning colour", text)
         self.assertIn("keep writing", text)
+        with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        for detail in ("`//` comments", "`[^1]: …`", "Markdown markers", "warning colour", "keep writing"):
+            self.assertIn(detail, readme)
 
 
 class Session:
@@ -2415,6 +2415,25 @@ class LauncherTests(unittest.TestCase):
             for f in (lawnotes.RUNNING_FILE, lawnotes.REQUEST_FILE):
                 if os.path.exists(f):
                     os.remove(f)
+
+
+    def test_abbreviations_file_has_one_source_for_its_header(self):
+        notes = tempfile.mkdtemp(dir=TMP)
+        self.env["LAWNOTES_DIR"] = notes
+        r = self.launch("--abbreviations")
+        self.assertNotIn("Traceback", r.stderr)
+        with open(os.path.join(notes, ".abbreviations.txt"), encoding="utf-8") as f:
+            made = f.read()
+        self.assertEqual(made, lawnotes.abbreviations_text("", []))
+        self.assertTrue(made.startswith(lawnotes.ABBREV_HEADER))
+        self.assertIn("(nothing) turns one off", made)
+        with open(os.path.join(ROOT, "lawnotes"), encoding="utf-8") as f:
+            self.assertNotIn("Exact case; whole words only", f.read())
+
+    def test_hint_bar_starts_as_before_and_lists_newer_features(self):
+        keys = [k for k, _ in lawnotes.HINTS]
+        self.assertEqual(keys[:11], ["^G", "^S", "^O", "^P", "^B", "^F", "^T", "^W", "^R", "⌥D", "^Q"])
+        self.assertEqual(keys[11:], ["⌥E", "⌥C", "⌥J", "⌥K", "⌥X"])
 
 
 class RevisionPackTests(unittest.TestCase):
@@ -3428,12 +3447,12 @@ class EssayModeTests(unittest.TestCase):
     def test_help_readme_and_questions(self):
         text = next(desc for key, desc in lawnotes.HELP if key == "Option+X")
         self.assertIn("Word limit 2,000", text)
-        self.assertIn("12 fn", text)
         self.assertIn("c change", text)
         self.assertIn("F8", text)
-        self.assertIn("warning colour", text)
         with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as f:
             readme = f.read()
+        self.assertIn("`· 12 fn`", readme)
+        self.assertIn("warning colour", readme)
         self.assertIn("Essay mode (Option+X, leave the minutes blank)", readme)
         self.assertIn("`// Word limit 2,000`", readme)
         import inspect

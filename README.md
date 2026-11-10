@@ -52,11 +52,14 @@ Only one copy of Law Notes runs at a time. Opening it again switches to the open
 Option+E (or F5) in the editor, or from a terminal:
 
 ```sh
-lawnotes --export Tort/Negligence docx    # or pdf; saved to ~/Downloads
+lawnotes --export Tort/Negligence docx
+lawnotes --export Tort/Negligence pdf
 lawnotes --export Tort/Essay docx --tables
 ```
 
-Exports go to Downloads. Law Notes replaces an unchanged export of its own. If a file was edited, or its export record is missing, it keeps that file and saves the new one as `Name (2).docx` (then `(3)` and so on); the editor shows the name and why.
+The last word is `docx` or `pdf`. Each file is saved to `~/Downloads`.
+
+Law Notes replaces an unchanged export of its own. If a file was edited, or its export record is missing, it keeps that file and saves the new one as `Name (2).docx` (then `(3)` and so on); the editor shows the name and why.
 
 For essays and coursework, choose "with tables of cases and legislation" (or add `--tables`): an OSCOLA Table of Cases and Table of Legislation go after the title (the first `# ` heading), built from the case names, citations, Acts and EU treaty articles in the note, with a page break before the note itself in Word.
 
@@ -64,16 +67,60 @@ Revision pack, the last choice in that menu, writes every note in the current no
 
 Word export needs pandoc: `brew install pandoc`. PDF export uses macOS itself.
 
+## Exam and essay mode
+
+Option+X (or F8) has two modes. It asks for the minutes first; Esc cancels any question.
+
+**Exam mode** is a timed essay or problem question. Give the minutes, then a word limit (leave the limit blank for none).
+
+- The status bar shows the time left and the words in the note. After the end it shows how long since (Time's up). You can keep writing the whole time.
+- The count is the body only. `//` comments and footnote lines (`[^1]: …`) are left out. So are Markdown markers (headings, bullets, *italic*, **bold**, `==highlights==`, `code`) and `[^1]` references. A link counts as the words it shows.
+- You are told once at 10 minutes left and once at 5.
+- Past the limit the count uses the theme's warning colour, the same as a misspelt word.
+- Option+X again asks whether to stop. Closing the pane or quitting also ends it.
+
+**Essay mode** is a word limit with no clock. Leave the minutes blank, then give the limit.
+
+- Law Notes writes `// Word limit 2,000` at the top of the note. That line is a comment, so it is left out of the count and of exports.
+- The status bar shows `1,214/2,000 words`, with `· 12 fn` after it when there are footnotes. Past the limit that count uses the warning colour too.
+- Delete the line, or change the number, to change the limit.
+- On a note that already has a limit, Option+X asks `c` change, `r` remove, or `e` for a timed exam. Esc cancels.
+- While an exam is running, its status replaces this count.
+
+## Find and replace
+
+Option+R (or F4), e.g. to correct Donohue to Donoghue.
+
+1. Type what to replace. It starts as the selected text or your last ^F search.
+2. Type what to put instead.
+3. Choose this note, all notes, or one match at a time (`y` replace, `n` skip, `a` all the rest, Esc stops).
+
+Capitals must match exactly. The replacements stay highlighted until Esc. ^Z undoes a replace in an open note. Other notes are saved in version history first, so ^R can restore them. The all-notes rules for read-only notes, outside links, Finder-locked notes and conflict copies are in the feature list above.
+
+## Revision cards
+
+Option+C (or F7). Each case brief (^T) is a card, with the case and citation on the front and the brief on the back. So is a bullet that names a case and says something about it. Choose this note, its folder or all notes.
+
+- Space shows the answer. Then press 1 for again, 2 for hard, 3 for good. Esc ends.
+- A card comes back after 1, 3, 7, 14, 30, then 60 days. Due cards come first, then new ones.
+- Progress is kept in UCL Notes, so every Mac shares it. Only numbered iCloud conflict copies are merged; other similarly named files are left alone.
+- If progress cannot be read, a rating is not saved and the status bar warns you.
+
 ## Updates, rollback, uninstall
 
 Once a day, Law Notes checks for a newer release. It installs one only if the release is signed with the Law Notes release key and passes its self-test on your Mac; otherwise it stays on the current version and tells you why. The new version is used the next time you open the editor.
 
 ```sh
-lawnotes --update      # check now
-lawnotes --rollback    # go back to the previous version (and skip the one you left)
+lawnotes --update
+lawnotes --rollback
 lawnotes --version
-lawnotes --uninstall   # removes the app and code; your notes and their history stay
+lawnotes --uninstall
 ```
+
+- `--update` checks for a release now.
+- `--rollback` goes back to the previous version, and skips the one you left.
+- `--version` shows the installed version.
+- `--uninstall` removes the app and code. Your notes and their history stay.
 
 Set `LAWNOTES_NO_UPDATE=1` to turn off automatic updates.
 
@@ -97,9 +144,11 @@ Set these as environment variables:
 ## Developing and releasing
 
 ```sh
-python3 -m unittest discover -s tests -v   # editor, install, update and rollback tests
+python3 -m unittest discover -s tests -v
 python3 lawnotes.py --self-test
 ```
+
+The first command runs the editor, install, update and rollback tests.
 
 CI runs the tests on macOS with the system Python (what a fresh Mac has) and a current Python, plus shellcheck. To release:
 
