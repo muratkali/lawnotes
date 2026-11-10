@@ -163,7 +163,7 @@ class AutocompleteTests(unittest.TestCase):
         self.scans = 0
         self.app.list_notes = lambda: [(self.stamp, "Source.md", self.source)]
 
-        def all_notes():
+        def all_notes(only=None):
             self.scans += 1
             return [(self.source, "Source.md", self.lines)]
 
@@ -233,7 +233,7 @@ class AutocompleteTests(unittest.TestCase):
 
     def test_unsaved_open_case_refreshes_cached_entries(self):
         b = self.app.buf
-        self.app.all_notes = lambda: [(self.source, "Source.md", self.lines),
+        self.app.all_notes = lambda only=None: [(self.source, "Source.md", self.lines),
                                       (b.path, "Draft.md", b.lines)]
         self.draft("Dono")
         self.assertTrue(self.app.complete_case())
@@ -309,7 +309,7 @@ class AutocompleteTests(unittest.TestCase):
         self.app.case_entries()
         renamed = self.source + ".renamed"
         os.rename(self.source, renamed)
-        self.app.all_notes = lambda: [(renamed, "Renamed.md", self.lines)]
+        self.app.all_notes = lambda only=None: [(renamed, "Renamed.md", self.lines)]
         self.app.case_index()
         self.assertFalse(os.path.exists(self.source))
         self.assertIn("no longer", messages[-1])
@@ -3570,6 +3570,158 @@ class EssayModeTests(unittest.TestCase):
         self.assertIn("[^1]: not counted at all\n", saved)
         self.assertIn("[^2]: also hidden\n", saved)
         self.assertEqual(saved.count("Word limit"), 1)
+
+
+class ScanSpeedTests(unittest.TestCase):
+    """The incremental case index equals a full rebuild, and the light reader equals Buffer."""
+
+    NAMES = ["Donoghue v Stevenson [1932] AC 562", "Caparo Industries plc v Dickman [1990] 2 AC 605",
+             "Caparo Industries plc v Dickman [1990] 1 AC 605", "Re Polemis [1921] 3 KB 560",
+             "Bolton v Stone [1951] AC 850", "Hedley Byrne v Heller", "Rylands v Fletcher (1868) LR 3 HL 330"]
+
+    def setUp(self):
+        self.saved = lawnotes.NOTES_DIR
+        self.dir = tempfile.mkdtemp(dir=TMP)
+        lawnotes.NOTES_DIR = os.path.join(self.dir, "notes")
+        os.makedirs(lawnotes.NOTES_DIR)
+        self.clock = 1_000_000.0
+        self.tick = 0
+        self.addCleanup(setattr, lawnotes, "NOTES_DIR", self.saved)
+
+    def write(self, rel, lines):
+        path = os.path.join(lawnotes.NOTES_DIR, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        self.tick += 1
+        os.utime(path, (1_500_000_000 + self.tick, 1_500_000_000 + self.tick))  # a distinct stamp each time
+        return path
+
+    def app(self, buf):
+        app = lawnotes.App.__new__(lawnotes.App)
+        app._cases = (0.0, None, None)
+        app._case_scans = {}
+        app.buf = buf
+        app.buffers = lambda: [(None, app.buf)]
+        return app
+
+    def entries(self, app):
+        self.clock += 10  # past the five-second limit on re-listing the folder
+        with patch.object(lawnotes.time, "time", return_value=self.clock):
+            return app.case_entries()
+
+    @staticmethod
+    def shape(entries):
+        return [(label, c["name"], c["cite"], c["best_cite"], list(c["cites"].items()), c["hits"])
+                for label, c in entries]
+
+    def same_as_rebuild(self, app):
+        got = self.shape(self.entries(app))
+        fresh = self.app(app.buf)
+        self.assertEqual(got, self.shape(self.entries(fresh)))
+        return got
+
+    def test_edit_open_buffer_disk_change_delete_and_add(self):
+        a = self.write("Tort/A.md", [self.NAMES[0], "text"])
+        b = self.write("Tort/B.md", [self.NAMES[1], self.NAMES[3]])
+        self.write("C.md", [self.NAMES[0] + " again"])
+        buf = lawnotes.Buffer(a)
+        app = self.app(buf)
+        before = self.same_as_rebuild(app)
+        buf.lines.append("See " + self.NAMES[4])
+        buf.version += 1
+        after = self.same_as_rebuild(app)
+        self.assertNotEqual(before, after)
+        self.write("Tort/B.md", [self.NAMES[2], "Re Polemis"])
+        self.same_as_rebuild(app)
+        os.remove(b)
+        self.same_as_rebuild(app)
+        self.write("New.md", [self.NAMES[5], self.NAMES[0]])
+        self.assertTrue(any("Hedley" in label for label, *_ in self.same_as_rebuild(app)))
+
+    def test_open_note_outside_the_folder_and_unsaved_text(self):
+        self.write("In.md", [self.NAMES[0]])
+        outside = os.path.join(self.dir, "Outside.md")
+        buf = lawnotes.Buffer(outside)
+        buf.lines = [self.NAMES[4]]
+        buf.version += 1
+        app = self.app(buf)
+        got = self.same_as_rebuild(app)
+        self.assertEqual(got[0][1], "Bolton v Stone")
+        buf.lines = [self.NAMES[5]]
+        buf.version += 1
+        self.assertTrue(any(name == "Hedley Byrne v Heller" for _, name, *_ in self.same_as_rebuild(app)))
+
+    def test_unchanged_notes_are_not_read_again(self):
+        for i in range(5):
+            self.write(f"N{i}.md", [self.NAMES[i % len(self.NAMES)]])
+        buf = lawnotes.Buffer(self.write("Open.md", [self.NAMES[0]]))
+        app = self.app(buf)
+        self.entries(app)
+        reads = []
+        real = lawnotes.read_note
+
+        def counting(path):
+            reads.append(path)
+            return real(path)
+
+        with patch.object(lawnotes, "read_note", counting):
+            buf.lines.append(self.NAMES[3])
+            buf.version += 1
+            self.entries(app)
+            self.assertEqual(reads, [])
+            changed = self.write("N2.md", [self.NAMES[6]])
+            self.entries(app)
+            self.assertEqual(reads, [changed])
+
+    def test_random_steps_equal_a_full_rebuild(self):
+        import random
+        rng = random.Random(1110)
+        for d in ("Tort", "Contract", ""):
+            for i in range(4):
+                self.write(os.path.join(d, f"N{i}.md"), [rng.choice(self.NAMES) for _ in range(rng.randint(0, 3))])
+        buf = lawnotes.Buffer(self.write("Tort/N0.md", ["start"]))
+        app = self.app(buf)
+        for step in range(48):
+            action = rng.choice(["edit", "modify", "add", "delete", "switch", "nothing"])
+            files = [os.path.join(r, f) for r, _, fs in os.walk(lawnotes.NOTES_DIR) for f in fs]
+            if action == "edit":
+                buf.lines.insert(rng.randint(0, len(buf.lines)), rng.choice(self.NAMES + ["plain"]))
+                buf.version += 1
+            elif action == "modify" and files:
+                path = rng.choice(files)
+                self.write(os.path.relpath(path, lawnotes.NOTES_DIR),
+                           [rng.choice(self.NAMES + ["plain"]) for _ in range(rng.randint(0, 4))])
+            elif action == "add":
+                self.write(f"Added/{step}.md", [rng.choice(self.NAMES) for _ in range(rng.randint(1, 3))])
+            elif action == "delete" and len(files) > 2:
+                victim = rng.choice([p for p in files if os.path.realpath(p) != os.path.realpath(buf.path)])
+                os.remove(victim)
+            elif action == "switch" and files:
+                app.buf = buf = lawnotes.Buffer(rng.choice(files))
+            self.same_as_rebuild(app)
+
+    def test_light_reader_equals_buffer(self):
+        samples = {
+            "bom.md": b"\xef\xbb\xbfDonoghue v Stevenson\nline\n",
+            "cp1252.md": "caf\N{LATIN SMALL LETTER E WITH ACUTE} \N{LEFT DOUBLE QUOTATION MARK}q\N{EM DASH}\n".encode("cp1252"),
+            "latin.md": b"caf\xe9 \x81\n",
+            "crlf.md": b"one\r\ntwo\rthree\r\n\r\n",
+            "tabs.md": b"\tindented\n a\tb\n",
+            "control.md": b"bell\x07 nul\x00 del\x7f end\n",
+            "empty.md": b"",
+            "blank.md": b"\n\n",
+            "nonl.md": b"no newline",
+        }
+        for name, data in samples.items():
+            path = os.path.join(self.dir, name)
+            with open(path, "wb") as f:
+                f.write(data)
+            buf = lawnotes.Buffer(path)
+            lines, note, mtime = lawnotes.read_note(path)
+            self.assertEqual(lines, buf.lines, name)
+            self.assertEqual(note, buf.note, name)
+            self.assertEqual(mtime, buf.disk_mtime, name)
 
 
 if __name__ == "__main__":

@@ -788,6 +788,40 @@ def moved_col(line, cx, find, repl):
 
 # --- Text buffer -------------------------------------------------------------
 
+def read_note(path):
+    """(lines, encoding message or None, mtime_ns) for a note, exactly as Buffer.load sees it.
+    Raises OSError if the file can't be read."""
+    with open(path, "rb") as f:
+        data = f.read()
+    mtime = os.stat(path).st_mtime_ns
+    label = None
+    for enc, label in (("utf-8-sig", None), ("cp1252", "Windows-1252"), ("latin-1", "Latin-1")):
+        try:
+            text = data.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    note = f"Opened as {label} text — it will be saved as UTF-8" if label else None
+    text = text.replace("\r\n", "\n").replace("\r", "\n").expandtabs(4)
+    text = CONTROL_RE.sub("\N{REPLACEMENT CHARACTER}", text)  # stray control bytes can't be drawn
+    lines = text.split("\n")
+    if len(lines) > 1 and lines[-1] == "":
+        lines.pop()
+    return lines, note, mtime
+
+
+def scan_cases(lines):
+    """[(line, column, length, case name, citation or "")] for each case name in a note's lines."""
+    hits = []
+    for i, line in enumerate(lines):
+        for m in CASE_RE.finditer(line):
+            rest = line[m.end():]
+            cm = CITE_RE.match(line, m.end() + len(rest) - len(rest.lstrip(" ,*_")))
+            cite = " ".join(cm.group().split()) if cm else ""
+            hits.append((i, m.start(), len(m.group()), " ".join(m.group().split()), cite))
+    return hits
+
+
 class Buffer:
     def __init__(self, path):
         self.path = path
@@ -811,23 +845,10 @@ class Buffer:
             self.load()
 
     def load(self):
-        with open(self.path, "rb") as f:
-            data = f.read()
-        self.disk_mtime = os.stat(self.path).st_mtime_ns
-        for enc, label in (("utf-8-sig", None), ("cp1252", "Windows-1252"), ("latin-1", "Latin-1")):
-            try:
-                text = data.decode(enc)
-                break
-            except UnicodeDecodeError:
-                continue
-        if label:
-            self.note = f"Opened as {label} text — it will be saved as UTF-8"
-        text = text.replace("\r\n", "\n").replace("\r", "\n").expandtabs(4)
-        text = CONTROL_RE.sub("\ufffd", text)  # stray control bytes can't be drawn
-        self.lines = text.split("\n")
+        self.lines, note, self.disk_mtime = read_note(self.path)
+        if note:
+            self.note = note
         self.version = getattr(self, "version", 0) + 1
-        if len(self.lines) > 1 and self.lines[-1] == "":
-            self.lines.pop()
 
     def save(self):
         """Write the note so it is never half-written and never overwrites a newer copy
@@ -2483,6 +2504,7 @@ class App:
         self.queued = []  # keys a menu chose, handled as if typed
         self._links = (0.0, None)  # when the notes were last listed for links, and their link_index
         self._cases = (0.0, None, None)  # last file check, file stamps, case entries
+        self._case_scans = {}  # path -> (key, hits): each note's case hits, rescanned only when its key changes
         self.history = History()
         self.abbreviations = load_abbreviations()
         self.speller = Speller(SPELL_LANG) if SPELL_ON and sys.platform == "darwin" else None
@@ -3801,16 +3823,19 @@ class App:
             else:
                 return
 
-    def all_notes(self):
-        """[(path, relative name, lines)] for every note; the open note uses its unsaved text."""
+    def all_notes(self, only=None):
+        """[(path, relative name, lines)] for every note; the open note uses its unsaved text.
+        With `only` (a set of paths), the other notes on disk are not read."""
         out, current = [], os.path.realpath(self.buf.path)
         for _, rel, path in self.list_notes():
             if os.path.realpath(path) == current:
                 out.append((path, rel, self.buf.lines))
                 current = None
+            elif only is not None and path not in only:
+                continue
             else:
                 try:
-                    out.append((path, rel, Buffer(path).lines))
+                    out.append((path, rel, read_note(path)[0]))
                 except OSError:
                     pass
         if current:  # a note opened from outside the notes folder
@@ -3964,27 +3989,43 @@ class App:
         if entries is not None and fresh == stamps:
             self._cases = (now, stamps, entries)
             return entries
+        # The notes in the order all_notes() gives them: an open note from outside the folder first,
+        # then the folder's notes, then any other open notes from outside it.
+        current = os.path.realpath(self.buf.path)
+        sources = []  # (path, relative name, open buffer or None)
+        in_folder = set()
+        for mtime, rel, path in listed:
+            real = os.path.realpath(path)
+            in_folder.add(real)
+            sources.append((path, rel, open_buffers.get(real) or (self.buf if real == current else None), mtime))
+        if current not in in_folder:
+            sources.insert(0, (self.buf.path, os.path.basename(self.buf.path), open_buffers.get(current) or self.buf, None))
+        sources += [(b.path, os.path.basename(b.path), b, None) for real, b in open_buffers.items()
+                    if real not in in_folder and real != current]
+        scans, kept = getattr(self, "_case_scans", {}), {}
+        keys = [(buf, buf.version) if buf else mtime for _, _, buf, mtime in sources]
+        stale = {path for (path, _, _, _), key in zip(sources, keys)
+                 if path not in scans or scans[path][0] != key}
+        fetched = {path: lines for path, _, lines in self.all_notes(only=stale)} if stale else {}
         cases = {}
-        notes = self.all_notes()
-        seen = {os.path.realpath(path) for path, _, _ in notes}
-        notes += [(b.path, os.path.basename(b.path), b.lines) for path, b in open_buffers.items()
-                  if path not in seen]
-        for path, rel, lines in notes:
-            buf = open_buffers.get(os.path.realpath(path))
-            if buf:
-                lines = buf.lines
-            for i, line in enumerate(lines):
-                for m in CASE_RE.finditer(line):
-                    name = " ".join(m.group().split())
-                    c = cases.setdefault(name.lower(), {"name": name, "cite": "", "hits": [], "cites": {}})
-                    rest = line[m.end():]
-                    cm = CITE_RE.match(line, m.end() + len(rest) - len(rest.lstrip(" ,*_")))
-                    if cm:
-                        cite = " ".join(cm.group().split())
-                        if not c["cite"]:
-                            c["cite"] = cite
-                        c["cites"][cite] = c["cites"].get(cite, 0) + 1
-                    c["hits"].append((path, rel, i, m.start(), len(m.group())))
+        for (path, rel, buf, mtime), key in zip(sources, keys):
+            if path not in stale:
+                hits = scans[path][1]
+            elif buf:
+                hits = scan_cases(buf.lines)
+            elif path in fetched:
+                hits = scan_cases(fetched[path])
+            else:  # unreadable
+                continue
+            kept[path] = (key, hits)
+            for i, start, length, name, cite in hits:
+                c = cases.setdefault(name.lower(), {"name": name, "cite": "", "hits": [], "cites": {}})
+                if cite:
+                    if not c["cite"]:
+                        c["cite"] = cite
+                    c["cites"][cite] = c["cites"].get(cite, 0) + 1
+                c["hits"].append((path, rel, i, start, length))
+        self._case_scans = kept
         entries = []
         for c in sorted(cases.values(), key=lambda c: c["name"].lower()):
             c["best_cite"] = max(c["cites"], key=c["cites"].get) if c["cites"] else ""
@@ -4338,7 +4379,7 @@ class App:
                     continue
                 seen.add(key)
                 buf = open_bufs.get(key)
-                lines = buf.lines if buf is not None else Buffer(path).lines
+                lines = buf.lines if buf is not None else read_note(path)[0]
             except OSError:
                 continue
             n = sum(line.count(find) for line in lines)
@@ -4430,6 +4471,7 @@ class App:
         if done:
             self.search = repl  # the replacements are highlighted; Esc clears
             self._cases = (0.0, None, None)
+            self._case_scans = {}
         summary = f"Replaced {done:,} in {changed} note{'s' * (changed != 1)}"
         self.say(summary + " · ^Z undoes it in an open note; ^R restores an earlier version of the others", 10)
         if problems:
@@ -4771,7 +4813,7 @@ class App:
             lines = open_lines.get(os.path.realpath(path))
             if lines is None:
                 try:
-                    lines = Buffer(path).lines
+                    lines = read_note(path)[0]
                 except OSError:
                     continue
             notes.append((name, lines))
