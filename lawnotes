@@ -143,14 +143,15 @@ def main():
         return subprocess.run([sys.executable, EDITOR] + args).returncode
 
     if flag == "--abbreviations":  # open the abbreviations file like a note
-        notes = os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes"))
-        note = os.path.join(notes, ".abbreviations.txt")
+        import importlib.util  # only here: ordinary launches never load the editor
+        spec = importlib.util.spec_from_file_location("lawnotes_editor", EDITOR)
+        editor = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(editor)
+        note = editor.ABBREV_FILE  # the header and defaults live in the editor, once
         if not os.path.exists(note):
-            os.makedirs(notes, exist_ok=True)
-            with open(note, "w") as f:
-                f.write("# Abbreviations: they expand when you finish the word (space, punctuation, Enter).\n"
-                        "# One per line: SHORT = Long form. Exact case; whole words only.\n"
-                        "CL = Common Law\nEL = Equity Law\nLCh = Lord Chancellor\n")
+            os.makedirs(os.path.dirname(note), exist_ok=True)
+            with open(note, "w", encoding="utf-8") as f:
+                f.write(editor.abbreviations_text("", []))
         flag = None
     in_herdr = bool(os.environ.get("HERDR_PANE_ID")) and shutil.which("herdr")
     mode = {"--window": "window", "--app": "window", "--split": "split", "--here": "here"}.get(

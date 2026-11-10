@@ -2345,7 +2345,7 @@ class Layout:
 
 HINTS = [("^G", "Help"), ("^S", "Save"), ("^O", "Open"), ("^P", "Search all"), ("^B", "Cases"),
          ("^F", "Find"), ("^T", "Template"), ("^W", "Spelling"), ("^R", "History"), ("⌥D", "Split"),
-         ("^Q", "Quit")]
+         ("^Q", "Quit"), ("⌥E", "Export"), ("⌥C", "Cards"), ("⌥J", "To-dos"), ("⌥K", "OSCOLA"), ("⌥X", "Exam")]
 
 # ^G help screen: (key, description); key "#" marks a section heading, "" a plain line.
 HELP = [
@@ -2376,11 +2376,11 @@ HELP = [
     ("Option+K", "Check this note for likely OSCOLA slips. Enter jumps to one; f fixes a mechanical slip and refreshes the list. F9 does the same."),
     ("^L", "Outline: jump to any heading or case in this note."),
     ("#", "Revising"),
-    ("Option+C", "Revision cards from your notes: each case brief (^T) is a card (the case and citation on the front, the brief on the back), and so is a bullet that names a case and says something about it. Choose this note, its folder or all notes. Space shows the answer; then 1 again, 2 hard, 3 good. Cards come back after 1, 3, 7, 14, 30, then 60 days; due cards first, then new ones. Esc ends. Progress is kept in UCL Notes, so every Mac shares it. Only numbered iCloud conflict copies are merged; other similarly named files are left alone. If progress cannot be read, a rating is not saved and the status bar warns you. F7 does the same."),
-    ("Option+X", "Exam mode for a timed essay or problem question. It asks how many minutes, then a word limit (leave the limit blank for none); Esc cancels either. The status bar shows the time left and the words in the note, or after the end how long since (Time's up). The count is the body only: // comments, footnote lines ([^1]: …) and Markdown markers are left out — headings, bullets, *italic*, **bold**, ==highlights==, `code`, links and [^1] references. The words a link shows are counted. It tells you once at 10 minutes and once at 5. Past the limit the count uses the theme's warning colour. You can keep writing the whole time. Option+X again asks whether to stop. Closing the pane or quitting ends it. Leave the minutes blank to set a word limit on this note instead, with no clock. Law Notes writes // Word limit 2,000 at the top of the note. That line is a comment, so it is left out of the count and of exports. The status bar shows 1,214/2,000 words, and · 12 fn when there are footnotes. Past the limit that count uses the warning colour too. Delete the line, or change the number, to change the limit. On a note that already has one, Option+X asks c change, r remove, or e for a timed exam; Esc cancels. While an exam is running, its status replaces that count. F8 does the same."),
+    ("Option+C", "Revision cards: each case brief (^T), and each bullet that names a case and says something about it, is a card. Choose this note, its folder or all notes. Space shows the answer; then 1 again, 2 hard, 3 good. Esc ends. F7 does the same."),
+    ("Option+X", "Exam mode: asks the minutes, then a word limit (blank for none). The status bar shows time left and words, and you can keep writing after time is up. Leave the minutes blank to keep a word limit in the note as // Word limit 2,000 (c change, r remove, e exam, once one exists). Option+X again stops an exam. F8 does the same."),
     ("#", "Moving around"),
     ("^F", "Find. Press ^F and Enter again (or F3) for the next match; Esc clears the highlight."),
-    ("Option+R", "Find and replace, e.g. Donohue → Donoghue. Type what to replace (it starts as the selected text or your ^F search) and what to put instead, then choose: this note, all notes, or one match at a time (y replace, n skip, a all the rest, Esc stop). Capitals must match exactly. All notes skips read-only notes and closed links to files outside the notes folder; open an outside link to replace there. Links to the same file are replaced once, even if spelled differently. It lists Finder-locked notes it cannot save. If a note changed elsewhere, a conflict copy is listed for you to merge. The replacements stay highlighted until Esc. ^Z undoes a replace in an open note; other notes are saved in version history first, so ^R can restore them. F4 does the same."),
+    ("Option+R", "Find and replace, e.g. Donohue → Donoghue. Type what to replace (it starts as the selected text or your ^F search), then what to put instead, then choose this note, all notes, or one match at a time (y replace, n skip, a all the rest, Esc stops). ^Z undoes it. F4 does the same."),
     ("^A  ^E", "Start / end of the line."),
     ("Option+↑ ↓", "Top / bottom of the note."),
     ("Option+⌫", "Delete the word before the cursor (Option+Fn+⌫: the word after it)."),
@@ -2403,7 +2403,7 @@ HELP = [
     ("^K", "Cut the line (press repeatedly to cut several lines)."),
     ("^U", "Paste the cut lines above the cursor."),
     ("^Z  ^Y", "Undo / redo. Undo also brings back a selection you clicked or moved away from."),
-    ("Option+E", "Export the note to Word (.docx) or PDF, into Downloads. An unchanged export is replaced; an edited file or one with no export record is kept, and the new export gets (2), (3) and so on. The status bar names the file and says why. Case names are put in italics (OSCOLA), even inside bold text; [^1] footnotes become real footnotes. F5 does the same. For an essay, pick “with tables of cases and legislation”: OSCOLA tables after the title, then a new page. Revision pack: every note in this note's folder, as one document named “Folder revision pack”, with a title page (the folder and the date), a contents list, then each note. With tables, one table of cases and one of legislation cover the whole pack."),
+    ("Option+E", "Export the note to Word (.docx) or PDF, into Downloads: case names in italics (OSCOLA), [^1] footnotes as real footnotes. For an essay pick “with tables of cases and legislation”. Revision pack: every note in this note's folder as one document. F5 does the same."),
     ("^R", "Version history: snapshots of your notes are taken automatically every few minutes while you work. Pick one to restore it (^Z undoes the restore)."),
     ("#", "Formatting (Markdown)"),
     ("# Title", "Heading;  ## Section  for a subheading."),
@@ -3166,6 +3166,17 @@ class App:
         self.put(top_y + height - 1, left_x, bar[:barw].ljust(barw), self.A[look])
         return cursor if active else None
 
+    def put_count_bar(self, y, x, barw, shown, active, count, over):
+        """Draw a status line, with the word count in the warning colour when it is over the limit."""
+        look = ("match" if self.save_failed else "bar") if active else "bar_off"
+        if barw < 1:
+            return
+        self.put(y, x, shown[:barw].ljust(barw), self.A[look])
+        if over:
+            at = shown.rfind(count)
+            if 0 <= at < barw:
+                self.put(y, x + at, count[:barw - at], self.A["spell"])
+
     def draw_exam_bar(self, y, x, barw, name, active, b):
         """Status line during an exam: time left and body words.
 
@@ -3182,14 +3193,7 @@ class App:
         text, count, over = exam_status(remaining, b.body_word_count(), exam["limit"])
         message = self.msg if active and time.time() < self.msg_until else ""
         shown = exam_bar_text(name, message, text, barw)
-        look = ("match" if self.save_failed else "bar") if active else "bar_off"
-        if barw < 1:
-            return
-        self.put(y, x, shown[:barw].ljust(barw), self.A[look])
-        if over:
-            at = shown.rfind(count)
-            if 0 <= at < barw:
-                self.put(y, x + at, count[:barw - at], self.A["spell"])
+        self.put_count_bar(y, x, barw, shown, active, count, over)
 
     def draw_essay_bar(self, y, x, barw, name, active, b):
         """Status line for a note that carries a word limit.
@@ -3208,14 +3212,7 @@ class App:
         elif active and self.link_hint():
             message = self.link_hint()
         shown = essay_bar_text(name, message, text, b.dirty, barw)
-        look = ("match" if self.save_failed else "bar") if active else "bar_off"
-        if barw < 1:
-            return
-        self.put(y, x, shown[:barw].ljust(barw), self.A[look])
-        if over:
-            at = shown.rfind(count)
-            if 0 <= at < barw:
-                self.put(y, x + at, count[:barw - at], self.A["spell"])
+        self.put_count_bar(y, x, barw, shown, active, count, over)
 
     def set_word_limit(self, n):
         """Write the limit at the top, or replace the limit line already in the note."""
