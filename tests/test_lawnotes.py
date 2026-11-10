@@ -1441,16 +1441,40 @@ class Session:
         import fcntl
         import termios
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", size[0], size[1], 0, 0))
-        self.out = self.read(2)
+        self.out = self.settle(2, quiet=0.3, cap=15)
 
     def read(self, seconds=0.4):
         out, end = b"", time.time() + seconds
         while time.time() < end:
-            if select.select([self.fd], [], [], 0.02)[0]:
+            if select.select([self.fd], [], [], max(0, min(0.02, end - time.time())))[0]:
                 try:
                     out += os.read(self.fd, 65536)
                 except OSError:
                     break
+        return out
+
+    def settle(self, seconds, quiet=0.08, cap=3):
+        """Read until the editor's output goes quiet: at least one chunk, then `quiet` s of silence,
+        up to `cap` s in all. If nothing arrives within `seconds` it stops there, so a test that
+        asserts "nothing happened" still waits as long as it always did. A slow runner just gets
+        more time (up to `cap`) once the editor has started answering."""
+        out, start = b"", time.monotonic()
+        last = None
+        while True:
+            now = time.monotonic()
+            if last is None:
+                if now - start >= seconds:
+                    break
+            elif now - last >= quiet or now - start >= max(cap, seconds):
+                break
+            if select.select([self.fd], [], [], 0.01)[0]:
+                try:
+                    chunk = os.read(self.fd, 65536)
+                except OSError:
+                    break
+                if chunk:
+                    out += chunk
+                    last = time.monotonic()
         return out
 
     def keys(self, data, seconds=0.4):
@@ -1473,7 +1497,11 @@ class Session:
                 break
             finally:
                 os.set_blocking(self.fd, True)
-        out = self.read(seconds)
+        if seconds < 0.05:
+            out = self.read(seconds)  # fire and forget (the fuzz test)
+        else:
+            # a lone Esc is only resolved by the editor after ESCAPE_WAIT (250 ms)
+            out = self.settle(seconds)
         self.out += out
         return re.sub(rb"\x1b\[[0-9;?<>]*[A-Za-z~]|\x1b\(B|\x1b[=>]", b" ", out).decode(errors="replace")
 
@@ -1488,7 +1516,7 @@ class Session:
     def quit(self, seconds=8):
         """^Q, then wait for the editor to exit; kill it and return False if it doesn't. The exit
         snapshots the shared test notes folder, which grows as the suite runs: hence the time."""
-        self.keys(b"\x11", 1.5)
+        self.keys(b"\x11", 0)
         for _ in range(int(seconds * 10)):
             if os.waitpid(self.pid, os.WNOHANG)[0] == self.pid:
                 return True
