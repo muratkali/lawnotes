@@ -2307,8 +2307,8 @@ class SessionTests(unittest.TestCase):
         s.keys(b"Donohoe\r", 0.4)
         screen = s.keys(b"Donoghue\r", 0.8)
         self.assertIn("All notes — 2 matches in 2 notes", screen)
-        screen = s.keys(b"\x1b[B\r", 1.5)                         # All notes
-        self.assertIn("2 in 2 notes ·", screen)                    # "Replaced 2 in 2 notes"
+        screen = s.keys_until(b"\x1b[B\r", "2 in 2 notes ·", 10)  # All notes
+        self.assertIn("2 in 2 notes ·", screen)                  # "Replaced 2 in 2 notes"
         self.assertEqual(open(b).read(), "Donoghue [1932] AC 562\n")
         s.keys(b"\x1a\x13", 0.5)                                  # ^Z undoes it in the open note
         self.assertTrue(s.quit())
@@ -2911,7 +2911,7 @@ class ReplaceEdgeTests(unittest.TestCase):
                                 "LAWNOTES_HISTORY": lawnotes.HISTORY_DIR}, size=(40, 40))
             s.keys(b"\x1br", 0.5)
             s.keys(b"DonohoeRO2\rDonoghueRO2\r", 0.8)
-            screen = s.keys(b"\x1b[B\r", 1.5)
+            screen = s.keys_until(b"\x1b[B\r", "ReplaceEdge/A.md — read-only", 10)
             self.assertIn("Replaced 1 in 1 note", screen)
             self.assertIn("ReplaceEdge/A.md — read-only", screen)
             s.keys(b"\x1b", 0.5)
@@ -2976,7 +2976,7 @@ class ReplaceEdgeTests(unittest.TestCase):
                             "LAWNOTES_HISTORY": lawnotes.HISTORY_DIR}, size=(40, 40))
         s.keys(b"\x1br", 0.5)
         s.keys(b"OutsideSpellAL\rOutsideReplAL\r", 0.8)
-        screen = s.keys(b"\x1b[B\r", 1.5)
+        screen = s.keys_until(b"\x1b[B\r", "Tort/Outside.md — linked from outside", 10)
         s.keys(b"\x1b", 0.5)
         self.assertTrue(s.quit())
         self.assertIn("Tort/Outside.md — linked from outside", screen)
@@ -3057,7 +3057,7 @@ class ReplaceEdgeTests(unittest.TestCase):
                             "LAWNOTES_HISTORY": lawnotes.HISTORY_DIR}, size=(40, 40))
         s.keys(b"\x1br", 0.5)
         s.keys(b"CaseSpellALI185\rCaseReplaceALI185\r", 0.8)
-        screen = s.keys(b"\r", 1.5)
+        screen = s.keys_until(b"\r", "Replaced 1 in 1 note", 10)
         self.assertTrue(s.quit())
         self.assertIn("Replaced 1 in 1 note", screen)
         with open(inside) as f:
@@ -3268,11 +3268,7 @@ class ExportSafetyTests(unittest.TestCase):
         s = Session(note, env={"LAWNOTES_EXPORT_DIR": self.out}, size=(40, 40))
         try:
             self.assertIn("Word document", s.keys(b"\x1be", 0.5))
-            screen = s.keys(b"Word document\r", 1.5)
-            for _ in range(30):
-                if "(2).docx saved: Safe.docx changed" in screen:
-                    break
-                screen += s.keys(b"", 0.1)
+            screen = s.keys_until(b"Word document\r", "(2).docx saved: Safe.docx changed", 10)
             self.assertIn("(2).docx saved: Safe.docx changed", screen)
             self.assertTrue(os.path.exists(os.path.join(self.out, "Safe (2).docx")))
             self.assertTrue(s.quit())
