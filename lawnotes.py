@@ -67,7 +67,7 @@ from functools import lru_cache
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # notesdir.py sits beside this file
 import notesdir  # noqa: E402
 
-VERSION = "1.6.1"
+VERSION = "1.7.0"
 HELP_TITLE = "Help — Law Notes (beta)"
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
 NOTES_DIR = notesdir.resolve()[0]  # LAWNOTES_DIR, else the folder chosen at install, else ~/UCL/notes if it exists, else ~/Law Notes

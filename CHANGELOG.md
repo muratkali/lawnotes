@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.6.1
+## 1.7.0
 
 - Tab case completion and the case index (^B) no longer reread every note after each edit: only notes that changed are scanned again.
 - The help screen (^G) is shorter: the long entries for Option+X, Option+R, Option+C and Option+E are now a few lines each, and the detail is in the README.
