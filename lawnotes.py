@@ -748,15 +748,32 @@ def next_marker(marker):
 
 
 @lru_cache(maxsize=8192)
-def wrap_starts(s, w):
-    """Offsets where each soft-wrapped row of `s` begins (word wrap at width w)."""
+def wrap_starts(s, w, hang=0):
+    """Offsets where each soft-wrapped row of `s` begins (word wrap at width w).
+    Rows after the first are `hang` cells narrower: they are drawn shifted right by it."""
     starts = [0]
     i = 0
-    while len(s) - i > w:
-        j = s.rfind(" ", i, i + w)
-        i = j + 1 if j > i else i + w
+    width = w
+    while len(s) - i > width:
+        j = s.rfind(" ", i, i + width)
+        i = j + 1 if j > i else i + width
         starts.append(i)
+        width = w - hang
     return tuple(starts)
+
+
+@lru_cache(maxsize=8192)
+def wrap_layout(s, w):
+    """(row starts, hang) for a line in a w-wide pane. The one source of truth for hanging indents:
+    continuation rows of a list item or quote start `hang` cells in, under the item's text. The
+    hang is the width of the marker (`- `, `1. `, `- [ ] `, `> `, plus any nesting indent), none
+    when it would take more than half the width or the pane is under 20 wide. Display only."""
+    hang = 0
+    if w >= 20 and len(s) > w:
+        m = BULLET_RE.match(s)
+        if m and m.end() <= w // 2:
+            hang = m.end()
+    return wrap_starts(s, w, hang), hang
 
 
 # Find and replace matches the exact text, capitals included: citations and case names are
@@ -2544,7 +2561,7 @@ class App:
         self.flash = None       # ((line, col), (line, col), until): what ^C just copied, flashed green
         self.last_click = (0.0, None, 0)  # time, position, count: for double and triple clicks
         self.hold_selection = False       # a double/triple click's release mustn't collapse it
-        self.row_map = []       # screen row -> (line, start, end, last segment) for mouse clicks
+        self.row_map = []       # screen row -> (line, start, end, last segment, x offset) for mouse clicks
         self.mouse_event = None  # a mouse report curses half-decoded as KEY_MOUSE (see get_key)
         self.partial = b""      # the first bytes of a character still arriving (see read_char)
         self.spell_cycle = None  # after ^W fixed a word: the word, its suggestions and which one is in
@@ -2918,7 +2935,11 @@ class App:
 
     # Layout helpers
     def segs(self, i):
-        return wrap_starts(self.buf.lines[i], self.wrapw)
+        return wrap_layout(self.buf.lines[i], self.wrapw)[0]
+
+    def hang_of(self, i):
+        """How far in the continuation rows of line i are drawn (the first row is never shifted)."""
+        return wrap_layout(self.buf.lines[i], self.wrapw)[1]
 
     def seg_of(self, i, cx):
         starts = self.segs(i)
@@ -3166,7 +3187,7 @@ class App:
         y, i, s = 0, self.top, self.top_seg
         while y < self.rows and i < len(b.lines):
             line = b.lines[i]
-            starts = self.segs(i)
+            starts, hang = wrap_layout(line, self.wrapw)
             attrs = self.highlight(line)
             typos = self.misspelt(line)
             if typos:
@@ -3193,16 +3214,17 @@ class App:
                     break
                 a = starts[k]
                 e = starts[k + 1] if k + 1 < len(starts) else len(line)
+                off = hang if k else 0  # continuation rows hang under the item's text
                 j = a
                 while j < e:
                     r = j
                     while r < e and attrs[r] == attrs[j]:
                         r += 1
-                    self.put(top_y + y, self.left + j - a, line[j:r], attrs[j])
+                    self.put(top_y + y, self.left + off + j - a, line[j:r], attrs[j])
                     j = r
                 if i == b.cy and k == ck:
-                    cursor = (top_y + y, self.left + b.cx - a)
-                self.row_map.append((i, a, e, k == len(starts) - 1))
+                    cursor = (top_y + y, self.left + off + b.cx - a)
+                self.row_map.append((i, a, e, k == len(starts) - 1, off))
                 y += 1
             i, s = i + 1, 0
 
@@ -3652,15 +3674,16 @@ class App:
     def move_vertical(self, delta):
         b = self.buf
         k, starts = self.seg_of(b.cy, b.cx)
-        if self.want_x is None:
-            self.want_x = b.cx - starts[k]
+        hang = self.hang_of(b.cy)
+        if self.want_x is None:  # the visual column, indent included
+            self.want_x = b.cx - starts[k] + (hang if k else 0)
         for _ in range(abs(delta)):
             if delta < 0:
                 if k > 0:
                     k -= 1
                 elif b.cy > 0:
                     b.cy -= 1
-                    starts = self.segs(b.cy)
+                    starts, hang = wrap_layout(b.lines[b.cy], self.wrapw)
                     k = len(starts) - 1
                 else:
                     b.cx = 0
@@ -3670,13 +3693,13 @@ class App:
                     k += 1
                 elif b.cy < len(b.lines) - 1:
                     b.cy += 1
-                    starts = self.segs(b.cy)
+                    starts, hang = wrap_layout(b.lines[b.cy], self.wrapw)
                     k = 0
                 else:
                     b.cx = len(b.lines[b.cy])
                     return
         end = starts[k + 1] - 1 if k + 1 < len(starts) else len(b.lines[b.cy])
-        b.cx = min(starts[k] + self.want_x, end)
+        b.cx = min(starts[k] + max(0, self.want_x - (hang if k else 0)), end)
 
     def misspelt(self, line):
         """(start, end) of words to mark as misspelt; skips names, citations and legal Latin."""
@@ -5026,8 +5049,8 @@ class App:
         if y >= len(self.row_map):  # below the text: end of the last line
             i = self.row_map[-1][0]
             return i, len(self.buf.lines[i])
-        i, a, e, last = self.row_map[y]
-        return i, min(a + max(0, x - self.left), e if last else max(a, e - 1))
+        i, a, e, last, off = self.row_map[y]
+        return i, min(a + max(0, x - self.left - off), e if last else max(a, e - 1))
 
     def mouse(self, button, x, y, pressed):
         """Click places the cursor, drag selects, Shift+click extends, wheel scrolls.

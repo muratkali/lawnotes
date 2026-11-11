@@ -8,6 +8,7 @@
 - `lawnotes --abbreviations` creates a new abbreviations file with the same header and defaults as Option+A.
 - README: commands in code blocks no longer carry `#` comments, which zsh passes to the command when pasted.
 - Tests wait for the editor to go quiet instead of for fixed times: the suite takes about a minute and a half instead of six.
+- Long bullets, numbered items, to-dos and quotes that wrap onto a second row now hang under their text instead of returning to the left margin. Display only: the note is unchanged.
 
 ## 1.6.0
 
