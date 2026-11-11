@@ -3729,7 +3729,7 @@ class ListRowTests(unittest.TestCase):
         self.assertEqual(lawnotes.HELP[0][0], "")
         self.assertIn("beta", lawnotes.HELP[0][1])
         self.assertEqual([k for k, _ in lawnotes.HELP[-2:]], ["", ""])
-        self.assertIn("~/UCL/notes", lawnotes.HELP[-1][1])
+        self.assertEqual(lawnotes.HELP[-1][1], "{notes}")  # filled in with the real folder when shown
 
     def test_every_pick_caller_gives_a_verb_and_the_guide_does_not_repeat_it(self):
         import ast
@@ -3763,7 +3763,6 @@ class ListRowTests(unittest.TestCase):
             m = re.search(r"\S.{0,40}?:1   (.{0,%d})" % (cols - 12), screen)
             self.assertTrue(m, screen)
             row = m.group(0)[:cols - 2]
-            print(f"\n[search, {cols} columns] {row}")
             self.assertIn("duty", row)
             self.assertIn("Esc cancels", screen)
             s.keys(b"\x1b", 0.4)
@@ -3776,7 +3775,6 @@ class ListRowTests(unittest.TestCase):
             screen = s.keys(b"\x1bj", 0.8)
             m = re.search(r"read Robinson paras 21-30 carefully.{0,30}", screen)
             self.assertTrue(m, screen)
-            print(f"\n[to-dos, {cols} columns] {m.group(0)[:cols - 2]}")
             if cols == 100:
                 self.assertIn("carefully · Tort/Week 2 Duty of care", screen)
             else:
@@ -3790,7 +3788,6 @@ class ListRowTests(unittest.TestCase):
                            (100, "type to filter · click or Enter switches · Esc cancels")):
             s = self.session(("A.md", "x\n"), size=(30, cols))
             screen = s.keys(b"\x1bt", 0.8)  # Option+T: themes
-            print(f"\n[themes footer, {cols} columns] {want}")
             self.assertIn(want, screen)
             s.keys(b"\x1b", 0.4)
             self.assertTrue(s.quit())
