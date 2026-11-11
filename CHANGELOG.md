@@ -8,7 +8,7 @@
 - `lawnotes --abbreviations` creates a new abbreviations file with the same header and defaults as Option+A.
 - README: commands in code blocks no longer carry `#` comments, which zsh passes to the command when pasted.
 - Tests wait for the editor to go quiet instead of for fixed times: the suite takes about a minute and a half instead of six.
-- New installs keep their notes in `~/Law Notes` (linked to iCloud Drive → Law Notes when that is on) instead of a "UCL" folder. Set `LAWNOTES_DIR` when running the installer to choose another folder; the choice is recorded in `~/.config/lawnotes/notes_dir` and used by the editor, the `lawnotes` command and the updater alike (`notesdir.py`). A Mac that already has `~/UCL/notes` keeps using it, unchanged.
+- New installs keep their notes in `~/Law Notes` (linked to iCloud Drive → Law Notes when that is on) instead of a "UCL" folder. Set `LAWNOTES_DIR` when running the installer to choose another folder; the choice is recorded in `~/.config/lawnotes/notes_dir` and used by the editor, the `lawnotes` command and the updater alike (`notesdir.py`). A Mac that already has `~/UCL/notes` keeps using it, unchanged, and so does a new Mac whose iCloud Drive already holds "UCL Notes" (the installer links `~/UCL/notes` to it, as before).
 - `lawnotes --where` shows which folder your notes are in. Help, the themes guide and the installer's messages name your real folder.
 
 ## 1.6.0

@@ -51,7 +51,7 @@ To keep your notes somewhere else, give the installer a full folder path by putt
 curl -fsSL https://raw.githubusercontent.com/muratkali/lawnotes/main/install.sh | LAWNOTES_DIR="$HOME/Documents/Law Notes" bash
 ```
 
-A custom folder is used as it is and is not linked to iCloud Drive. A Mac that already uses `~/UCL/notes` keeps using it, with nothing moved; run `lawnotes --where` to see which folder your copy uses. Running the installer again with `LAWNOTES_DIR` changes the folder for later runs but never moves notes.
+A custom folder is used as it is and is not linked to iCloud Drive. A Mac that already uses `~/UCL/notes` keeps using it, with nothing moved, and a new Mac whose iCloud Drive already has a **UCL Notes** folder gets `~/UCL/notes` linked to it, as before; run `lawnotes --where` to see which folder your copy uses. Running the installer again with `LAWNOTES_DIR` changes the folder for later runs but never moves notes.
 
 Only one copy of Law Notes runs at a time. Opening it again switches to the open copy (and opens the note you asked for there).
 

@@ -215,6 +215,39 @@ class ReleaseTests(unittest.TestCase):
         command = os.path.join(home, ".local", "bin", "lawnotes")
         self.assertEqual(run(sys.executable, command, "--where", env={**self.env, "HOME": home}).stdout.strip(), notes)
 
+    def test_1e2_new_mac_with_the_ucl_notes_already_in_icloud(self):
+        """The README's flow: a new Mac, iCloud Drive synced, UCL Notes already there. The old link is made."""
+        def synced(h):
+            real = os.path.join(self.icloud(h), "UCL Notes")
+            os.makedirs(real)
+            for name in ("Tort.md", "Contract.md"):
+                with open(os.path.join(real, name), "w") as f:
+                    f.write("# " + name + "\n")
+        home = tempfile.mkdtemp(dir=self.tmp)
+        synced(home)
+        real = os.path.join(self.icloud(home), "UCL Notes")
+        before = self.snapshot(self.icloud(home))
+        env = {**self.env, "HOME": home}
+        r = run("bash", os.path.join(self.work, "install.sh"), env=env)
+        self.assertEqual(os.readlink(os.path.join(home, "UCL", "notes")), real)
+        self.assertIn("Notes: 2 in iCloud Drive/UCL Notes", r.stdout)
+        self.assertIn("Your notes live in ~/UCL/notes", r.stdout)
+        self.assertNotIn("is empty on this Mac", r.stdout)
+        self.assertEqual(self.snapshot(self.icloud(home)), before)  # notes unchanged, nothing added beside them
+        self.assertEqual(os.listdir(self.icloud(home)), ["UCL Notes"])
+        self.assertFalse(os.path.lexists(os.path.join(home, "Law Notes")))
+        self.assertFalse(os.path.lexists(os.path.join(home, ".config", "lawnotes", "notes_dir")))
+        command = os.path.join(home, ".local", "bin", "lawnotes")
+        self.assertEqual(run(sys.executable, command, "--where", env=env).stdout.strip(), os.path.join(home, "UCL", "notes"))
+        probe = "import sys; sys.path.insert(0, %r); import %s; print(%s)"
+        for module, expr in (("lawnotes", "lawnotes.NOTES_DIR"), ("update", "update.NOTES")):
+            out = run(sys.executable, "-B", "-c", probe % (self.work, module, expr), env=env).stdout.strip()
+            self.assertEqual(out, os.path.join(home, "UCL", "notes"), module)
+        # iCloud Drive without a UCL Notes folder: the new default, as before
+        home, r = self.fresh_install(lambda h: os.makedirs(os.path.join(self.icloud(h), "Other")))
+        self.assertTrue(os.path.islink(os.path.join(home, "Law Notes")))
+        self.assertFalse(os.path.lexists(os.path.join(home, "UCL")))
+
     def test_1e_fresh_install_with_icloud_drive(self):
         home, r = self.fresh_install(lambda h: os.makedirs(self.icloud(h)))
         notes = os.path.join(home, "Law Notes")

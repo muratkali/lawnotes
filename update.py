@@ -369,7 +369,8 @@ def icloud_names():
 def choose_notes():
     """(folder, whether to record it) for this install; writes nothing. LAWNOTES_DIR set while
     installing is the choice and is recorded; an existing record or an existing ~/UCL/notes
-    stays exactly as it is (nothing recorded); a Mac with neither gets, and records, the default."""
+    stays exactly as it is (nothing recorded); iCloud Drive's "UCL Notes", if present on a new Mac,
+    means ~/UCL/notes linked to it (nothing recorded); otherwise the default is used and recorded."""
     if os.environ.get("LAWNOTES_DIR"):
         folder = notesdir.clean(os.environ["LAWNOTES_DIR"])
         if not folder:
@@ -377,6 +378,10 @@ def choose_notes():
                               "(no control characters; not your home folder, the disk's root or a file)")
         return folder, True
     folder, source = notesdir.resolve()
+    if source == "default" and os.path.isdir(os.path.join(ICLOUD, "UCL Notes")):
+        # A new Mac whose iCloud Drive already holds the UCL notes: link ~/UCL/notes to them, as the
+        # old installer did. Install time only; the editor never probes iCloud to find its folder.
+        return notesdir.legacy(), False
     return folder, source == "default"
 
 
