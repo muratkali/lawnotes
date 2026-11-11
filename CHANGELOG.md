@@ -12,6 +12,7 @@
 - The to-do list (Option+J) keeps the to-do and shortens the note name first, instead of the other way round.
 - Each list's footer says what Enter does there (opens, jumps, exports, switches, restores...) and drops whole parts when the window is narrow, instead of cutting "Esc cancel" short.
 - The help screen (^G) now opens with Notes and folders, Writing and Searching; Panes and Colours come last.
+- Long bullets, numbered items, to-dos and quotes that wrap onto a second row now hang under their text instead of returning to the left margin. Display only: the note is unchanged.
 
 ## 1.6.0
 

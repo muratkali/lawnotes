@@ -3703,6 +3703,272 @@ class ListRowTests(unittest.TestCase):
             self.assertTrue(s.quit())
 
 
+class Screen:
+    """Just enough of a terminal to read back what curses drew: cursor moves, erase, text."""
+
+    def __init__(self, data, rows, cols):
+        self.rows, self.cols = rows, cols
+        self.grid = [[" "] * cols for _ in range(rows)]
+        self.y = self.x = 0
+        text = data.decode("utf-8", "replace")
+        pos, last = 0, ""
+        for m in re.finditer(r"\x1b\[([?>]?)([0-9;]*)([@-~])|\x1b[()][A-Za-z0-9]|\x1b[=>78]|([\r\n\b])|([^\x1b\r\n\b]+)", text):
+            if m.group(5):
+                for ch in m.group(5):
+                    if self.x >= cols:
+                        self.x = cols - 1
+                    self.grid[self.y][self.x] = ch
+                    self.x += 1
+                last = m.group(5)[-1]
+            elif m.group(4):
+                if m.group(4) == "\r":
+                    self.x = 0
+                elif m.group(4) == "\n":
+                    self.y = min(rows - 1, self.y + 1)
+                else:
+                    self.x = max(0, self.x - 1)
+            elif m.group(3) and not m.group(1):
+                self.csi(m.group(3), [int(p) if p else 0 for p in m.group(2).split(";")], last)
+
+    def csi(self, cmd, p, last):
+        n = p[0] or 1
+        if cmd in "Hf":
+            self.y, self.x = min(self.rows - 1, (p[0] or 1) - 1), min(self.cols - 1, ((p[1] if len(p) > 1 else 0) or 1) - 1)
+        elif cmd == "A":
+            self.y = max(0, self.y - n)
+        elif cmd == "B":
+            self.y = min(self.rows - 1, self.y + n)
+        elif cmd == "C":
+            self.x = min(self.cols - 1, self.x + n)
+        elif cmd == "D":
+            self.x = max(0, self.x - n)
+        elif cmd == "G":
+            self.x = min(self.cols - 1, n - 1)
+        elif cmd == "d":
+            self.y = min(self.rows - 1, n - 1)
+        elif cmd == "K":
+            a, e = {0: (self.x, self.cols), 1: (0, self.x + 1), 2: (0, self.cols)}[p[0]]
+            self.grid[self.y][a:e] = [" "] * (e - a)
+        elif cmd == "J":
+            if p[0] in (0, 2):
+                self.grid[self.y][self.x:] = [" "] * (self.cols - self.x)
+                for r in range(self.y + 1, self.rows):
+                    self.grid[r] = [" "] * self.cols
+            if p[0] in (1, 2):
+                for r in range(0, self.y):
+                    self.grid[r] = [" "] * self.cols
+                self.grid[self.y][:self.x + 1] = [" "] * (self.x + 1)
+        elif cmd == "X":
+            self.grid[self.y][self.x:self.x + n] = [" "] * len(self.grid[self.y][self.x:self.x + n])
+        elif cmd == "P":
+            row = self.grid[self.y]
+            row[self.x:] = row[self.x + n:] + [" "] * min(n, self.cols - self.x)
+        elif cmd == "@":
+            row = self.grid[self.y]
+            row[self.x:] = ([" "] * n + row[self.x:])[:self.cols - self.x]
+        elif cmd == "b":
+            for _ in range(n):
+                if self.x < self.cols:
+                    self.grid[self.y][self.x] = last
+                    self.x += 1
+
+    def row(self, y):
+        return "".join(self.grid[y]).rstrip()
+
+
+class IndentTests(unittest.TestCase):
+    """Soft-wrapped list items hang under their text. Display only: the file is never changed."""
+
+    def test_hang_by_marker(self):
+        words = " ".join(["word"] * 30)
+        for marker, hang in (("- ", 2), ("* ", 2), ("1. ", 3), ("12) ", 4), ("- [ ] ", 6), ("- [x] ", 6),
+                             ("> ", 2), ("    - ", 6), ("  1. ", 5)):
+            line = marker + words
+            starts, got = lawnotes.wrap_layout(line, 40)
+            self.assertEqual(got, hang, marker)
+            self.assertGreater(len(starts), 2, marker)
+            for k in range(len(starts) - 1):  # no row is wider than the pane allows
+                self.assertLessEqual(starts[k + 1] - starts[k], 40 - (hang if k else 0), marker)
+
+    def test_hang_changes_only_the_wrap(self):
+        line = "- " + " ".join(["word"] * 30)
+        starts, hang = lawnotes.wrap_layout(line, 40)
+        self.assertEqual(starts, lawnotes.wrap_starts(line, 40, 2))
+        self.assertNotEqual(starts, lawnotes.wrap_starts(line, 40))
+        rows = [line[a:b] for a, b in zip(starts, starts[1:] + (len(line),))]
+        self.assertEqual("".join(rows), line)  # no character added or lost
+        self.assertEqual(starts[1], lawnotes.wrap_starts(line, 40)[1])  # the first row is as wide as ever
+
+    def test_hang_is_capped(self):
+        deep = " " * 30 + "- " + " ".join(["word"] * 30)
+        self.assertEqual(lawnotes.wrap_layout(deep, 40)[1], 0)      # more than half the width
+        self.assertEqual(lawnotes.wrap_layout("- " + "word " * 30, 19)[1], 0)  # very narrow pane
+        self.assertEqual(lawnotes.wrap_layout("- " + "word " * 30, 20)[1], 2)
+        self.assertEqual(lawnotes.wrap_layout(" " * 20 + "- " + "word " * 30, 40)[1], 0)  # 22 > 40 // 2
+        self.assertEqual(lawnotes.wrap_layout(" " * 18 + "- " + "word " * 30, 40)[1], 20)
+
+    def test_no_marker_and_unbroken_word(self):
+        plain = " ".join(["word"] * 30)
+        self.assertEqual(lawnotes.wrap_layout(plain, 40), (lawnotes.wrap_starts(plain, 40), 0))
+        self.assertEqual(lawnotes.wrap_layout("- " + "x" * 100, 40)[0], (0, 2, 40, 78))  # breaks after "- ", then 38-wide rows
+        self.assertEqual(lawnotes.wrap_layout("-" + "x" * 100, 40), (lawnotes.wrap_starts("-" + "x" * 100, 40), 0))
+        self.assertEqual(lawnotes.wrap_layout("x" * 100, 40)[0], (0, 40, 80))
+        self.assertEqual(lawnotes.wrap_layout("- short", 40), ((0,), 0))
+
+    ITEM = "- " + " ".join(f"w{i:02d}" for i in range(60))
+
+    def run_session(self, name, text, cols, script):
+        """Run `script(session, screen_of, x0)` on a note holding `text`; returns the saved file."""
+        note = os.path.join(lawnotes.NOTES_DIR, name)
+        os.makedirs(lawnotes.NOTES_DIR, exist_ok=True)
+        with open(note, "w") as f:
+            f.write(text)
+        s = Session(note, size=(30, cols))
+        try:
+            script(s, lambda: Screen(s.out, 30, cols))
+        finally:
+            s.quit()
+        with open(note) as f:
+            return f.read()
+
+    @staticmethod
+    def rows_of(scr, first="- w00"):
+        """(y of the item's first row, its column, the y values of the rows below it)."""
+        y0 = next(y for y in range(scr.rows) if first in scr.row(y))
+        x0 = scr.row(y0).index(first)
+        ys = [y0]
+        while scr.row(ys[-1] + 1).lstrip().startswith("w"):
+            ys.append(ys[-1] + 1)
+        for y in ys[1:]:  # every test below starts from a hanging indent
+            assert len(scr.row(y)) - len(scr.row(y).lstrip()) == x0 + 2, scr.row(y)
+        return x0, ys
+
+    def test_continuation_rows_are_drawn_indented(self):
+        lines = ["- " + "alpha beta gamma delta " * 5, "* " + "alpha beta gamma delta " * 5,
+                 "1. " + "alpha beta gamma delta " * 5, "- [ ] " + "alpha beta gamma delta " * 5,
+                 "    - " + "alpha beta gamma delta " * 5, "> " + "alpha beta gamma delta " * 5,
+                 "plain " + "alpha beta gamma delta " * 5]
+        hangs = [2, 2, 3, 6, 6, 2, 0]
+        for cols in (40, 100):
+            def script(s, screen):
+                scr = screen()
+                y = 0
+                for line, hang in zip(lines, hangs):
+                    first = scr.row(y)
+                    x0 = len(first) - len(first.lstrip()) if not line.startswith(" ") else first.index("-") - 4
+                    for k in range(1, 4):
+                        row = scr.row(y + k)
+                        if not row.lstrip().startswith(("alpha", "beta", "gamma", "delta")):
+                            break
+                        self.assertEqual(len(row) - len(row.lstrip()) - x0, hang, (cols, line, row))
+                    else:
+                        pass
+                    y += 1
+                    while scr.row(y).lstrip().startswith(("alpha", "beta", "gamma", "delta")):
+                        y += 1
+                self.assertGreater(y, 7)
+            saved = self.run_session(f"Hang{cols}.md", "\n".join(lines) + "\n", cols, script)
+            self.assertEqual(saved, "\n".join(lines) + "\n")
+
+    def test_quoted_before_after_at_40(self):
+        def script(s, screen):
+            scr = screen()
+            x0, ys = self.rows_of(scr)
+            self.assertGreater(len(ys), 3)
+            self.assertEqual([scr.row(y).strip() for y in ys[:3]], [
+                "- w00 w01 w02 w03 w04 w05 w06 w07", "w08 w09 w10 w11 w12 w13 w14 w15",
+                "w16 w17 w18 w19 w20 w21 w22 w23"])
+            self.assertEqual([len(scr.row(y)) - len(scr.row(y).lstrip()) - x0 for y in ys[:3]], [0, 2, 2])
+        self.run_session("Show40.md", self.ITEM + "\n", 40, script)
+
+    def test_typing_at_end_goes_where_the_cursor_is(self):
+        for cols in (40, 100):
+            def script(s, screen):
+                s.keys(b"\x05ZQ", 0.5)
+                scr = screen()
+                self.assertEqual(scr.row(scr.y)[:scr.x][-2:], "ZQ", (cols, scr.y, scr.x))
+                self.assertEqual(scr.row(scr.y)[scr.x:], "")
+                x0, ys = self.rows_of(scr)
+                self.assertEqual(scr.y, next(y for y in reversed(ys)))
+                s.keys(b"\x13", 0.5)
+            saved = self.run_session(f"Type{cols}.md", self.ITEM + "\ntail\n", cols, script)
+            self.assertEqual(saved, self.ITEM + "ZQ\ntail\n")
+
+    def index_at(self, scr, y, x, x0, ys):
+        """Index in ITEM of the character drawn at screen (y, x)."""
+        row = scr.row(y)
+        start = x0 if y == ys[0] else len(row) - len(row.lstrip())
+        return self.ITEM.index(row[start:]) + (x - start)
+
+    def test_up_down_keep_the_visual_column(self):
+        for cols in (40, 100):
+            def script(s, screen):
+                scr = screen()
+                x0, ys = self.rows_of(scr)
+                col = x0 + 12
+                s.keys(f"\x1b[<0;{col + 1};{ys[0] + 1}M\x1b[<0;{col + 1};{ys[0] + 1}m".encode(), 0.5)
+                scr = screen()
+                self.assertEqual((scr.y, scr.x), (ys[0], col))
+                for y in ys[1:3]:
+                    s.keys(b"\x1b[B", 0.4)
+                    scr = screen()
+                    self.assertEqual((scr.y, scr.x), (y, col), cols)
+                s.keys(b"\x1b[A", 0.4)
+                scr = screen()
+                self.assertEqual((scr.y, scr.x), (ys[1], col), cols)
+                s.keys(b"!\x13", 0.5)
+                scr = screen()
+                self.assertEqual(scr.row(scr.y)[scr.x - 1], "!")
+            saved = self.run_session(f"Updown{cols}.md", self.ITEM + "\ntail\n", cols, script)
+            self.assertEqual(saved.replace("!", ""), self.ITEM + "\ntail\n")
+            self.assertEqual(saved.count("!"), 1)
+
+    def test_click_on_continuation_row(self):
+        for cols in (40, 100):
+            where = {}
+
+            def script(s, screen):
+                scr = screen()
+                x0, ys = self.rows_of(scr)
+                y, x = ys[2], x0 + 9
+                where["idx"] = self.index_at(scr, y, x, x0, ys)
+                s.keys(f"\x1b[<0;{x + 1};{y + 1}M\x1b[<0;{x + 1};{y + 1}m".encode(), 0.5)
+                scr = screen()
+                self.assertEqual((scr.y, scr.x), (y, x))
+                s.keys(b"!\x13", 0.5)
+            saved = self.run_session(f"Click{cols}.md", self.ITEM + "\ntail\n", cols, script)
+            i = where["idx"]
+            self.assertEqual(saved, self.ITEM[:i] + "!" + self.ITEM[i:] + "\ntail\n", cols)
+
+    def test_click_in_the_indent_goes_to_row_start(self):
+        where = {}
+
+        def script(s, screen):
+            scr = screen()
+            x0, ys = self.rows_of(scr)
+            row = scr.row(ys[1])
+            where["idx"] = self.ITEM.index(row.lstrip())
+            s.keys(f"\x1b[<0;{x0 + 1};{ys[1] + 1}M\x1b[<0;{x0 + 1};{ys[1] + 1}m".encode(), 0.5)
+            s.keys(b"!\x13", 0.5)
+        saved = self.run_session("Gap.md", self.ITEM + "\n", 40, script)
+        i = where["idx"]
+        self.assertEqual(saved, self.ITEM[:i] + "!" + self.ITEM[i:] + "\n")
+
+    def test_drag_select_across_continuation_rows(self):
+        where = {}
+
+        def script(s, screen):
+            scr = screen()
+            x0, ys = self.rows_of(scr)
+            a, b = (ys[0], x0 + 6), (ys[2], x0 + 6)
+            where["a"] = self.index_at(scr, a[0], a[1], x0, ys)
+            where["b"] = self.index_at(scr, b[0], b[1], x0, ys)
+            s.keys(f"\x1b[<0;{a[1] + 1};{a[0] + 1}M\x1b[<32;{b[1] + 1};{b[0] + 1}M\x1b[<0;{b[1] + 1};{b[0] + 1}m".encode(), 0.5)
+            s.keys(b"!\x13", 0.5)
+        saved = self.run_session("Drag.md", self.ITEM + "\n", 40, script)
+        self.assertEqual(saved, self.ITEM[:where["a"]] + "!" + self.ITEM[where["b"]:] + "\n")
+
+
 class ScanSpeedTests(unittest.TestCase):
     """The incremental case index equals a full rebuild, and the light reader equals Buffer."""
 
