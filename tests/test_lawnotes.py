@@ -316,6 +316,43 @@ class AutocompleteTests(unittest.TestCase):
 
 
 class TextTests(unittest.TestCase):
+    def folder_texts(self, folder, shared):
+        """(help sentence, themes guide, location) for a notes folder under a fresh HOME, linked
+        to iCloud Drive/<shared> if given."""
+        home = tempfile.mkdtemp(dir=TMP)
+        icloud = os.path.join(home, "Library", "Mobile Documents", "com~apple~CloudDocs")
+        os.makedirs(icloud)
+        notes = os.path.join(home, *folder)
+        os.makedirs(os.path.dirname(notes), exist_ok=True)
+        if shared:
+            os.makedirs(os.path.join(icloud, shared))
+            os.symlink(os.path.join(icloud, shared), notes)
+        else:
+            os.makedirs(notes)
+        with patch.dict(os.environ, {"HOME": home}), patch.object(lawnotes, "NOTES_DIR", notes), \
+                patch.object(lawnotes, "ICLOUD_DIR", icloud):
+            return lawnotes.help_notes_line(), lawnotes.themes_guide(), lawnotes.notes_location()
+
+    def test_texts_name_the_real_notes_folder(self):
+        # the existing layout reads exactly as it did when the names were fixed
+        help_line, themes, where = self.folder_texts(("UCL", "notes"), "UCL Notes")
+        self.assertEqual(help_line, "Notes are plain Markdown files in ~/UCL/notes, which points to iCloud Drive → UCL Notes, "
+                         "so they're backed up off this Mac and open on iPhone or iPad (Files app). Any other app can open them too.")
+        self.assertEqual(themes, "Enter switches theme. Yours are in UCL Notes → .themes, so every Mac has them.")
+        self.assertEqual(where, "iCloud Drive/UCL Notes")
+        # a new install, with and without iCloud Drive
+        help_line, themes, where = self.folder_texts(("Law Notes",), "Law Notes")
+        self.assertIn("in ~/Law Notes, which points to iCloud Drive → Law Notes, so", help_line)
+        self.assertEqual(themes, "Enter switches theme. Yours are in Law Notes → .themes, so every Mac has them.")
+        self.assertEqual(where, "iCloud Drive/Law Notes")
+        help_line, themes, where = self.folder_texts(("Law Notes",), None)
+        self.assertEqual(help_line, "Notes are plain Markdown files in ~/Law Notes, on this Mac only (not in iCloud Drive). "
+                         "Any other app can open them too.")
+        self.assertEqual(themes, "Enter switches theme. Yours are in ~/Law Notes → .themes.")
+        for text in (help_line, themes, where):
+            self.assertNotIn("UCL", text)
+        self.assertTrue(any(desc == "{notes}" for _, desc in lawnotes.HELP))  # shown via help_notes_line()
+
     def test_paste_keeps_special_spaces(self):
         self.assertEqual(lawnotes.clean_text("v Stevenson [1932] AC\r\n562\x07"), "v Stevenson [1932] AC\n562")
 
@@ -2429,6 +2466,62 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("(nothing) turns one off", made)
         with open(os.path.join(ROOT, "lawnotes"), encoding="utf-8") as f:
             self.assertNotIn("Exact case; whole words only", f.read())
+
+    def where_each_program_says(self, home, **env):
+        """The notes folder as the `lawnotes` command, the editor and the updater each see it."""
+        env = {k: v for k, v in {**os.environ, "HOME": home}.items() if k != "LAWNOTES_DIR"} | env
+        probe = "import sys; sys.path.insert(0, %r); import %s; print(%s)"
+        answers = [subprocess.run([sys.executable, "-B", os.path.join(ROOT, "lawnotes"), "--where"], env=env,
+                                  capture_output=True, text=True, timeout=20, cwd=home).stdout.strip()]
+        for module, expr in (("lawnotes", "lawnotes.NOTES_DIR"), ("update", "update.NOTES")):
+            r = subprocess.run([sys.executable, "-B", "-c", probe % (ROOT, module, expr)], env=env,
+                               capture_output=True, text=True, timeout=20, cwd=home)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            answers.append(r.stdout.strip())
+        return answers
+
+    def test_command_editor_and_updater_agree_on_the_notes_folder(self):
+        def new_home():
+            return tempfile.mkdtemp(dir=TMP)
+        record = lambda home, text: (os.makedirs(os.path.join(home, ".config", "lawnotes")), open(
+            os.path.join(home, ".config", "lawnotes", "notes_dir"), "w").write(text))
+        # nothing set up: the new default
+        home = new_home()
+        self.assertEqual(self.where_each_program_says(home), [os.path.join(home, "Law Notes")] * 3)
+        # an existing ~/UCL/notes (even a link that does not lead anywhere yet) keeps being used
+        os.makedirs(os.path.join(home, "UCL"))
+        os.symlink(os.path.join(home, "not-synced-yet"), os.path.join(home, "UCL", "notes"))
+        self.assertEqual(self.where_each_program_says(home), [os.path.join(home, "UCL", "notes")] * 3)
+        # a recorded choice beats ~/UCL/notes
+        record(home, os.path.join(home, "Chosen") + "\n")
+        self.assertEqual(self.where_each_program_says(home), [os.path.join(home, "Chosen")] * 3)
+        # and LAWNOTES_DIR beats the record
+        once = os.path.join(home, "Once")
+        self.assertEqual(self.where_each_program_says(home, LAWNOTES_DIR=once), [once] * 3)
+        # a record may say ~/…
+        home = new_home()
+        record(home, "~/Documents/Law\n")
+        self.assertEqual(self.where_each_program_says(home), [os.path.join(home, "Documents", "Law")] * 3)
+        # a record nobody can use is ignored by all three alike
+        home = new_home()
+        record(home, "not/absolute\n")
+        self.assertEqual(self.where_each_program_says(home), [os.path.join(home, "Law Notes")] * 3)
+
+    def test_only_notesdir_decides_the_folder(self):
+        """The folder is worked out in notesdir.py alone: the other programs must not grow copies
+        of the rules that could drift from it."""
+        for name in ("lawnotes.py", "lawnotes"):
+            with open(os.path.join(ROOT, name), encoding="utf-8") as f:
+                text = f.read()
+            self.assertIsNone(re.search(r"environ(\.get\(|\[)\s*[\"']LAWNOTES_DIR", text), name)
+            self.assertNotIn('"~/UCL/notes"', text, name)
+            self.assertNotIn('"~/Law Notes"', text, name)
+        with open(os.path.join(ROOT, "lawnotes.py"), encoding="utf-8") as f:
+            self.assertIn("notesdir.resolve()", f.read())
+        with open(os.path.join(ROOT, "update.py"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("NOTES = notesdir.resolve()[0]", text)
+        self.assertNotIn('"notes_dir"', text)  # where the record lives is notesdir's alone
 
     def test_hint_bar_starts_as_before_and_lists_newer_features(self):
         keys = [k for k, _ in lawnotes.HINTS]

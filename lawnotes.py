@@ -3,14 +3,15 @@
 lawnotes — a small terminal editor for law notes.
 
     lawnotes                 open Law Notes (inside herdr: in a "Notes" tab)
-    lawnotes Tort/Duty       open or create ~/UCL/notes/Tort/Duty.md
+    lawnotes Tort/Duty       open or create Tort/Duty.md in your notes folder
     lawnotes --help          all launcher options (update, rollback, uninstall…)
 
 Installed copies update themselves once a day to the newest signed release that
 passes its self-test (set LAWNOTES_NO_UPDATE=1 to stop that). See update.py.
 
-Notes are plain Markdown kept in ~/UCL/notes (set LAWNOTES_DIR to change it), which is a
-link to iCloud Drive/UCL Notes. Version history is kept on this Mac only, in
+Notes are plain Markdown kept in ~/Law Notes, or the folder chosen when installing (set
+LAWNOTES_DIR to use another for one run; see notesdir.py), linked to iCloud Drive when that
+is on. Version history is kept on this Mac only, in
 ~/Library/Application Support/lawnotes/history.git.
 Changes autosave a few seconds after you stop typing, and on quit.
 
@@ -63,10 +64,13 @@ import unicodedata
 from collections import namedtuple
 from functools import lru_cache
 
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # notesdir.py sits beside this file
+import notesdir  # noqa: E402
+
 VERSION = "1.6.1"
 HELP_TITLE = "Help — Law Notes (beta)"
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
-NOTES_DIR = os.path.abspath(os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes")))
+NOTES_DIR = notesdir.resolve()[0]  # LAWNOTES_DIR, else the folder chosen at install, else ~/UCL/notes if it exists, else ~/Law Notes
 NOTE_EXTS = (".md", ".txt")
 MAX_TEXT_WIDTH = 90
 LEFT_PAD = 1  # columns of space before the text in each pane
@@ -2149,11 +2153,29 @@ def revision_queue(cards, progress, today):
 
 
 def notes_location():
-    """Where the notes really are, in words: 'iCloud Drive/UCL Notes' or '~/UCL/notes'."""
+    """Where the notes really are, in words: 'iCloud Drive/Law Notes' or '~/Law Notes'."""
     real, icloud = os.path.realpath(NOTES_DIR), os.path.realpath(ICLOUD_DIR)
     if real.startswith(icloud + os.sep):
         return "iCloud Drive/" + os.path.relpath(real, icloud)
     return NOTES_DIR.replace(os.path.expanduser("~"), "~", 1)
+
+
+def help_notes_line():
+    """The help screen's sentence about where the notes are, true for this Mac's folder."""
+    folder = NOTES_DIR.replace(os.path.expanduser("~"), "~", 1)
+    where = notes_location()
+    if where.startswith("iCloud Drive/"):
+        return (f"Notes are plain Markdown files in {folder}, which points to {where.replace('/', ' → ')}, so they're "
+                "backed up off this Mac and open on iPhone or iPad (Files app). Any other app can open them too.")
+    return (f"Notes are plain Markdown files in {folder}, on this Mac only (not in iCloud Drive). "
+            "Any other app can open them too.")
+
+
+def themes_guide():
+    where = notes_location()
+    if where.startswith("iCloud Drive/"):
+        return f"Enter switches theme. Yours are in {where[len('iCloud Drive/'):].replace('/', ' → ')} → .themes, so every Mac has them."
+    return f"Enter switches theme. Yours are in {where} → .themes."
 
 
 class History:
@@ -2436,7 +2458,7 @@ HELP = [
     ("", "Case names gold, citations like [1932] AC 562 pink, statutes like s 2(1) or Human Rights Act 1998 green, links to other notes underlined, **bold** white and *italic* pale blue (each theme has its own), misspelt words highlighted in red."),
     ("D  V  C", "Party labels in problem answers: D (defendant) orange, V (victim) pink, C (claimant) blue; also D1, D2, D's."),
     ("", "If Law Notes ever closes or crashes unexpectedly, the reason is logged in iCloud Drive → Law Notes Logs."),
-    ("", "Notes are plain Markdown files in ~/UCL/notes, which points to iCloud Drive → UCL Notes, so they're backed up off this Mac and open on iPhone or iPad (Files app). Any other app can open them too."),
+    ("", "{notes}"),  # replaced by help_notes_line() when the help is shown
 ]
 ENTER = ("\n", "\r", curses.KEY_ENTER)
 # Escape sequences curses may pass through untranslated (e.g. arrows sent as ESC [ A)
@@ -2647,7 +2669,7 @@ class App:
             if self.theme not in THEMES:
                 items.append((f"  Edit “{self.theme}”", ("edit", self.theme)))
             return [it for it in items if query.lower() in it[0].lower()]
-        choice = self.pick("Themes", build, guide="Enter switches theme. Yours are in UCL Notes → .themes, so every Mac has them.")
+        choice = self.pick("Themes", build, guide=themes_guide())
         if not choice:
             return
         action, name = choice
@@ -3833,6 +3855,7 @@ class App:
             keyw = min(13, max(8, W // 4))
             rows = []  # (text, attr, key, x) after wrapping to the window
             for key, desc in HELP:
+                desc = desc.replace("{notes}", help_notes_line())
                 if key == "#":
                     rows += [("", 0, "", 1), (desc, self.A["h1"], "", 1)]
                     continue
@@ -5560,7 +5583,7 @@ def run_curses(fn):
 
 
 def resolve_note(arg):
-    """'Tort/Duty' means ~/UCL/notes/Tort/Duty.md; an existing file path is used as is."""
+    """'Tort/Duty' means Tort/Duty.md in the notes folder; an existing file path is used as is."""
     if CONTROL_RE.search(arg):
         raise ValueError("a note name can't contain control characters")
     path = os.path.expanduser(arg.strip())

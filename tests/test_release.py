@@ -100,21 +100,51 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("<key>$~F703</key>", text)
         self.assertIn("<key>~F701</key>", text)   # Option+Down/Up: end/start of the note
         self.assertIn("<key>~F700</key>", text)
-        self.assertTrue(os.path.islink(os.path.join(self.home, "UCL", "notes")) or
-                        os.path.isdir(os.path.join(self.home, "UCL", "notes")))
+        self.assertTrue(os.path.isdir(os.path.join(self.home, "Law Notes")))   # a fresh Mac gets the neutral folder
+        self.assertFalse(os.path.lexists(os.path.join(self.home, "UCL")))
+        self.assertEqual(self.lawnotes_cmd("--where").stdout.strip(), os.path.join(self.home, "Law Notes"))
         self.assertIn("Law Notes", self.lawnotes_cmd("--version").stdout)
+
+    def fresh_install(self, setup=None, check=True, **env):
+        """Run the installer in a new temporary HOME (set up first by setup(home)); (home, result)."""
+        home = tempfile.mkdtemp(dir=self.tmp)
+        if setup:
+            setup(home)
+        r = run("bash", os.path.join(self.work, "install.sh"), env={**self.env, "HOME": home, **env}, check=check)
+        return home, r
+
+    @staticmethod
+    def icloud(home):
+        return os.path.join(home, "Library", "Mobile Documents", "com~apple~CloudDocs")
+
+    @staticmethod
+    def snapshot(*roots):
+        """Every name, link target and file content (and mtime) under the roots, to compare before and after."""
+        seen = {}
+        for root in roots:
+            if not os.path.lexists(root):
+                continue
+            for base, dirs, files in os.walk(root):
+                for name in dirs + files:
+                    p = os.path.join(base, name)
+                    if os.path.islink(p):
+                        seen[p] = ("link", os.readlink(p))
+                    elif os.path.isdir(p):
+                        seen[p] = ("dir",)
+                    else:
+                        with open(p, "rb") as f:
+                            seen[p] = ("file", f.read(), os.path.getmtime(p))
+        return seen
 
     def test_1b_installer_tells_the_truth(self):
         """The messages the run review asked for: empty iCloud folder, notes on this Mac only,
         and an app that couldn't be built. Each in a fresh home."""
         def install(setup):
-            home = tempfile.mkdtemp(dir=self.tmp)
-            setup(home)
-            r = run("bash", os.path.join(self.work, "install.sh"), env={**self.env, "HOME": home})
-            return r.stdout
-        icloud = lambda h: os.path.join(h, "Library", "Mobile Documents", "com~apple~CloudDocs")
+            return self.fresh_install(setup)[1].stdout
+        icloud = self.icloud
         out = install(lambda h: os.makedirs(icloud(h)))
-        self.assertIn("UCL Notes is empty on this Mac", out)
+        self.assertIn("Law Notes is empty on this Mac", out)
+        self.assertNotIn("UCL", out)
         def local_notes(h):
             os.makedirs(icloud(h))
             os.makedirs(os.path.join(h, "UCL", "notes"))
@@ -131,6 +161,108 @@ class ReleaseTests(unittest.TestCase):
         out = install(foreign_app)
         self.assertIn("isn't Law Notes", out)
         self.assertNotIn("Open it from Spotlight", out)
+
+    def test_1c_existing_ucl_install_is_untouched(self):
+        """The author's Mac: ~/UCL/notes is a link to iCloud Drive/UCL Notes, with notes and dotfiles.
+        Installing, updating and uninstalling change nothing there, and no Law Notes folder appears."""
+        def author(h):
+            real = os.path.join(self.icloud(h), "UCL Notes")
+            os.makedirs(os.path.join(real, "Tort"))
+            os.makedirs(os.path.join(real, ".themes"))
+            for name, text in (("Tort/Duty.md", "# Duty\n"), (".abbreviations.txt", "CL = Common Law\n"),
+                               (".settings.json", "{}"), (".themes/Mine", "bg #000000\n")):
+                with open(os.path.join(real, name), "w") as f:
+                    f.write(text)
+            os.makedirs(os.path.join(h, "UCL"))
+            os.symlink(real, os.path.join(h, "UCL", "notes"))
+        watched = lambda h: (os.path.join(h, "UCL"), self.icloud(h))
+        home = tempfile.mkdtemp(dir=self.tmp)
+        author(home)
+        before = self.snapshot(*watched(home))
+        signers = os.path.join(home, "my_allowed_signers")  # uninstall deletes the signers file: not the shared one
+        shutil.copy(self.signers, signers)
+        env = {**self.env, "HOME": home, "LAWNOTES_SIGNERS": signers}
+        out = run("bash", os.path.join(self.work, "install.sh"), env=env).stdout
+        self.assertIn("Notes: 1 in iCloud Drive/UCL Notes", out)
+        self.assertIn("Your notes live in ~/UCL/notes", out)
+        self.assertNotIn("Law Notes is empty", out)
+        self.assertEqual(self.snapshot(*watched(home)), before)
+        self.assertEqual(sorted(os.listdir(self.icloud(home))), ["UCL Notes"])
+        self.assertFalse(os.path.lexists(os.path.join(home, "Law Notes")))
+        self.assertFalse(os.path.lexists(os.path.join(home, ".config", "lawnotes", "notes_dir")))  # nothing recorded
+        command = os.path.join(home, ".local", "bin", "lawnotes")
+        self.assertEqual(run(sys.executable, command, "--where", env=env).stdout.strip(), os.path.join(home, "UCL", "notes"))
+        run(sys.executable, command, "--update", env=env)  # an update: no prompt, no change to notes
+        self.assertEqual(self.snapshot(*watched(home)), before)
+        self.assertFalse(os.path.lexists(os.path.join(home, "Law Notes")))
+        out = run(sys.executable, command, "--uninstall", env=env, stdin="").stdout  # uninstall, old folder name
+        self.assertIn(f"Your notes ({os.path.join(home, 'UCL', 'notes')}) and their history are NOT touched", out)
+        self.assertFalse(os.path.exists(os.path.join(home, ".local", "share", "lawnotes")))
+        self.assertEqual(self.snapshot(*watched(home)), before)
+
+    def test_1d_fresh_install_without_icloud(self):
+        home, r = self.fresh_install()
+        notes = os.path.join(home, "Law Notes")
+        self.assertTrue(os.path.isdir(notes) and not os.path.islink(notes))
+        self.assertIn("Notes: 0 in ~/Law Notes", r.stdout)
+        self.assertIn("Your notes live in ~/Law Notes. To use another folder, run the installer again with", r.stdout)
+        self.assertNotIn("UCL", r.stdout)
+        self.assertFalse(os.path.lexists(os.path.join(home, "UCL")))
+        with open(os.path.join(home, ".config", "lawnotes", "notes_dir")) as f:
+            self.assertEqual(f.read(), notes + "\n")
+        # the record keeps the choice even if a ~/UCL/notes folder turns up later
+        os.makedirs(os.path.join(home, "UCL", "notes"))
+        command = os.path.join(home, ".local", "bin", "lawnotes")
+        self.assertEqual(run(sys.executable, command, "--where", env={**self.env, "HOME": home}).stdout.strip(), notes)
+
+    def test_1e_fresh_install_with_icloud_drive(self):
+        home, r = self.fresh_install(lambda h: os.makedirs(self.icloud(h)))
+        notes = os.path.join(home, "Law Notes")
+        shared = os.path.join(self.icloud(home), "Law Notes")
+        self.assertEqual(os.readlink(notes), shared)
+        self.assertIn("Notes: 0 in iCloud Drive/Law Notes", r.stdout)
+        self.assertIn("Law Notes is empty on this Mac", r.stdout)
+        self.assertIn("right-click iCloud Drive → Law Notes → Keep Downloaded", r.stdout)
+        self.assertIn("Your notes live in ~/Law Notes", r.stdout)
+        self.assertNotIn("UCL", r.stdout)
+        self.assertEqual(os.listdir(self.icloud(home)), ["Law Notes"])  # beside the History and Logs folders, not in them
+
+    def test_1f_lawnotes_dir_at_install_is_recorded(self):
+        # a folder of the student's choice: used as it is, never linked into iCloud Drive
+        chosen = os.path.join(self.tmp, "chosen", "Study Notes")
+        home, r = self.fresh_install(lambda h: os.makedirs(self.icloud(h)), LAWNOTES_DIR=chosen)
+        self.assertTrue(os.path.isdir(chosen) and not os.path.islink(chosen))
+        self.assertIn(f"Notes: 0 in {chosen}", r.stdout)
+        self.assertFalse(os.path.lexists(os.path.join(home, "Law Notes")))
+        self.assertEqual(os.listdir(self.icloud(home)), [])
+        with open(os.path.join(home, ".config", "lawnotes", "notes_dir")) as f:
+            self.assertEqual(f.read(), chosen + "\n")
+        command = os.path.join(home, ".local", "bin", "lawnotes")
+        env = {k: v for k, v in {**self.env, "HOME": home}.items() if k != "LAWNOTES_DIR"}  # later runs: no variable
+        self.assertEqual(run(sys.executable, command, "--where", env=env).stdout.strip(), chosen)
+        # asking for the old author's folder on a new Mac recreates the old link to UCL Notes
+        home, r = self.fresh_install(lambda h: os.makedirs(self.icloud(h)), LAWNOTES_DIR="~/UCL/notes")
+        self.assertEqual(os.readlink(os.path.join(home, "UCL", "notes")), os.path.join(self.icloud(home), "UCL Notes"))
+        self.assertIn("Notes: 0 in iCloud Drive/UCL Notes", r.stdout)
+
+    def test_1g_unusable_lawnotes_dir_stops_the_install(self):
+        for bad in ("relative/folder", "/", "/tmp/x\x1b[2J"):
+            home, r = self.fresh_install(check=False, LAWNOTES_DIR=bad)
+            self.assertNotEqual(r.returncode, 0, bad)
+            self.assertIn("LAWNOTES_DIR must be a full folder path", r.stderr)
+            self.assertFalse(os.path.lexists(os.path.join(home, ".config", "lawnotes", "notes_dir")), bad)
+            self.assertFalse(os.path.lexists(os.path.join(home, "Law Notes")), bad)
+            self.assertFalse(os.path.lexists(os.path.join(home, ".local", "bin", "lawnotes")), bad)
+
+    def test_1h_hostile_record_is_ignored_by_the_installer(self):
+        def hostile(h):
+            os.makedirs(os.path.join(h, ".config", "lawnotes"))
+            with open(os.path.join(h, ".config", "lawnotes", "notes_dir"), "w") as f:
+                f.write("../../escape\x1b[2J\n")
+        home, r = self.fresh_install(hostile)
+        self.assertIn("Notes: 0 in ~/Law Notes", r.stdout)
+        self.assertTrue(os.path.isdir(os.path.join(home, "Law Notes")))
+        self.assertFalse(os.path.lexists(os.path.join(self.tmp, "escape")))
 
     def test_2_signed_update(self):
         self.release("v9.0.1", change=lambda w: open(os.path.join(w, "README.md"), "a").write("\n9.0.1\n"))
@@ -246,10 +378,12 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(os.listdir(home), [])
 
     def test_8_uninstall_keeps_notes(self):
-        notes = os.path.realpath(os.path.join(self.home, "UCL", "notes"))
+        notes = os.path.realpath(os.path.join(self.home, "Law Notes"))
         os.makedirs(notes, exist_ok=True)
         open(os.path.join(notes, "Keep.md"), "w").write("# Keep\n")
-        run(sys.executable, self.lawnotes, "--uninstall", env=self.env, stdin="")
+        out = run(sys.executable, self.lawnotes, "--uninstall", env=self.env, stdin="").stdout
+        self.assertIn(f"Your notes ({os.path.join(self.home, 'Law Notes')}) and their history are NOT touched", out)
+        self.assertTrue(os.path.exists(os.path.join(self.home, ".config", "lawnotes", "notes_dir")))  # the choice is kept
         self.assertFalse(os.path.exists(self.share))
         self.assertFalse(os.path.lexists(self.lawnotes))
         self.assertFalse(os.path.exists(os.path.join(self.home, "Applications", "Law Notes.app")))

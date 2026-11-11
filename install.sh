@@ -5,8 +5,9 @@
 #
 # Installs the newest signed release (or LAWNOTES_VERSION=vX.Y.Z): the code in
 # ~/.local/share/lawnotes, the `lawnotes` command in ~/.local/bin and Law Notes.app in
-# ~/Applications. Notes go in ~/UCL/notes, linked to iCloud Drive/UCL Notes when
-# iCloud Drive is on. Releases must be signed with the Law Notes release key below;
+# ~/Applications. Notes go in ~/Law Notes, linked to iCloud Drive/Law Notes when iCloud
+# Drive is on; LAWNOTES_DIR=/some/folder, set for bash, chooses another folder, and a Mac
+# that already has ~/UCL/notes keeps using it. Releases must be signed with the Law Notes release key below;
 # this Mac trusts that key from now on, and update.py refuses anything else.
 
 # The Law Notes release key (public half). Trusted on first install.
