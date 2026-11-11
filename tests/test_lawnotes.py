@@ -1456,6 +1456,7 @@ class Session:
     def keys(self, data, seconds=0.4):
         # Write only as fast as the editor reads: a full terminal input buffer must never block the
         # test forever (an editor that stops reading fails the test, showing what it was doing).
+        sent = data
         deadline = time.time() + 30
         while data:
             if not select.select([], [self.fd], [], 0.1)[1]:
@@ -1473,6 +1474,11 @@ class Session:
                 break
             finally:
                 os.set_blocking(self.fd, True)
+        if sent.endswith(b"\x1b") and seconds >= 0.05:
+            # The editor resolves a lone Esc only after ESCAPE_WAIT (250 ms) of silence. If the next
+            # keys arrive sooner (a slow CI runner), ESC + ESC x is read as one key and the Esc is
+            # lost. So keep the line quiet for several ESCAPE_WAIT before returning.
+            seconds = max(seconds, 4 * lawnotes.ESCAPE_WAIT / 1000)
         out = self.read(seconds)
         self.out += out
         return re.sub(rb"\x1b\[[0-9;?<>]*[A-Za-z~]|\x1b\(B|\x1b[=>]", b" ", out).decode(errors="replace")
