@@ -977,7 +977,7 @@ class ReplaceTests(unittest.TestCase):
         app.todos()
         self.assertEqual(app.msg, "No open to-dos in your notes")
 
-    def test_todos_narrow_labels_keep_the_note(self):
+    def test_todos_narrow_labels_keep_the_todo(self):
         a = self.note("Contract/Offer.md", "- [ ] Read the whole judgment about unilateral offers\n")
         app = self.app(a)
         app.scr = type("Screen", (), {"getmaxyx": lambda self: (40, 40)})()
@@ -985,7 +985,8 @@ class ReplaceTests(unittest.TestCase):
         def pick(title, build, *args, **kwargs):
             label = build("unilateral")[0][0]  # the full text is still searchable
             self.assertLessEqual(len(label), 38)
-            self.assertTrue(label.endswith(" · Contract/Offer"))
+            self.assertTrue(label.startswith("Read the whole judgment about"))  # the note name goes first
+            self.assertNotIn(" · ", label)
             return None
 
         app.pick = pick
@@ -3570,6 +3571,136 @@ class EssayModeTests(unittest.TestCase):
         self.assertIn("[^1]: not counted at all\n", saved)
         self.assertIn("[^2]: also hidden\n", saved)
         self.assertEqual(saved.count("Word limit"), 1)
+
+
+class ListRowTests(unittest.TestCase):
+    """Search rows, to-do rows, list footers and the order of the help screen."""
+
+    LINE = "In Robinson v Chief Constable [2018] UKSC 4, the duty of care was held to arise on ordinary principles."
+
+    def test_search_row_always_shows_the_match(self):
+        rel = "Tort/Week 2 Duty of care.md"
+        j = self.LINE.find("duty")
+        for room in (20, 30, 38, 49, 60, 100, 200):
+            row = lawnotes.search_row(rel, 6, self.LINE, j, 4, room)
+            self.assertLessEqual(len(row), room, (room, row))
+            self.assertIn("duty", row, (room, row))
+        self.assertEqual(lawnotes.search_row(rel, 6, self.LINE, j, 4, 200), rel + ":6   " + self.LINE)
+        narrow = lawnotes.search_row(rel, 6, self.LINE, j, 4, 38)
+        self.assertIn("…", narrow[narrow.index(":6"):])
+
+    def test_search_row_match_at_start_end_and_indented(self):
+        row = lawnotes.search_row("A.md", 1, "duty " + "x" * 80, 0, 4, 30)
+        self.assertTrue(row.startswith("A.md:1   duty "), row)
+        self.assertTrue(row.endswith("…"), row)
+        row = lawnotes.search_row("A.md", 1, "y" * 80 + " duty", 81, 4, 30)
+        self.assertTrue(row.endswith("duty"), row)
+        self.assertIn("…", row)
+        row = lawnotes.search_row("A.md", 1, "      " + "z" * 60 + " duty", 67, 4, 30)
+        self.assertTrue(row.endswith("duty"), row)
+        self.assertLessEqual(len(row), 30)
+
+    def test_shorten_note_name_cuts_folder_then_name(self):
+        self.assertEqual(lawnotes.shorten_note_name("Tort/Duty.md", 40), "Tort/Duty.md")
+        self.assertEqual(lawnotes.shorten_note_name("Tort/Duty.md", 10), "…/Duty.md")
+        self.assertEqual(lawnotes.shorten_note_name("Tort/Week 2 Duty of care.md", 12), "Week 2 Duty…")
+
+    def test_todo_row_keeps_the_todo_and_cuts_the_note_first(self):
+        text, note = "read Robinson paras 21-30", "Tort/Week 2 Duty of care"
+        self.assertEqual(lawnotes.todo_row(text, note, 100), f"{text} · {note}")
+        row = lawnotes.todo_row(text, note, 49)
+        self.assertTrue(row.startswith(text + " · …"), row)
+        self.assertEqual(len(row), 49)
+        self.assertEqual(lawnotes.todo_row(text, note, 38), f"{text} · …y of care")  # 10 characters: the minimum
+        self.assertEqual(lawnotes.todo_row(text, note, 37), text)  # under 10 characters of note: dropped
+        self.assertEqual(lawnotes.todo_row(text, note, 20), text[:19] + "…")
+
+    def test_pick_footer_drops_whole_parts(self):
+        full = lawnotes.pick_footer("open", 100)
+        self.assertEqual(full, "type to filter · click or Enter opens · Esc cancels")
+        self.assertEqual(lawnotes.pick_footer("open", len(full) - 1), "type to filter · Enter opens · Esc cancels")
+        self.assertEqual(lawnotes.pick_footer("open", 25), "Enter opens · Esc cancels")
+        self.assertEqual(lawnotes.pick_footer("switch", 30), "Enter switches · Esc cancels")
+        self.assertEqual(lawnotes.pick_footer("open", 24), "Esc cancels")
+        self.assertEqual(lawnotes.pick_footer("open", 5), "Esc")
+        for width in range(0, 80):
+            text = lawnotes.pick_footer("export", width)
+            self.assertLessEqual(len(text), width)
+            self.assertTrue(text == "" or text.endswith(("Esc cancels", "Esc")), text)
+
+    def test_help_starts_with_notes_and_ends_with_the_plain_lines(self):
+        sections = [d for k, d in lawnotes.HELP if k == "#"]
+        self.assertEqual(sections, ["Notes and folders", "Writing", "Searching", "Revising", "Moving around",
+                                    "Selecting, copying and pasting", "Editing", "Formatting (Markdown)",
+                                    "Panes", "Colours"])
+        self.assertEqual(lawnotes.HELP[0][0], "")
+        self.assertIn("beta", lawnotes.HELP[0][1])
+        self.assertEqual([k for k, _ in lawnotes.HELP[-2:]], ["", ""])
+        self.assertIn("~/UCL/notes", lawnotes.HELP[-1][1])
+
+    def test_every_pick_caller_gives_a_verb_and_the_guide_does_not_repeat_it(self):
+        import ast
+        tree = ast.parse(open(os.path.join(ROOT, "lawnotes.py")).read())
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == "pick" and isinstance(n.func.value, ast.Name) and n.func.value.id == "self"]
+        self.assertGreaterEqual(len(calls), 17)
+        for call in calls:
+            names = {k.arg for k in call.keywords}
+            self.assertIn("enter", names, f"pick call at line {call.lineno}")
+            for k in call.keywords:
+                if k.arg == "guide":
+                    guide = " ".join(c.value for c in ast.walk(k.value) if isinstance(c, ast.Constant)
+                                     and isinstance(c.value, str))
+                    self.assertNotRegex(guide, r"\bEnter\b", f"guide at line {call.lineno}")
+
+    def session(self, *notes, size):
+        folder = os.path.join(tempfile.mkdtemp(dir=TMP), "notes")
+        paths = []
+        for rel, text in notes:
+            path = os.path.join(folder, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            open(path, "w").write(text)
+            paths.append(path)
+        return Session(paths[0], env={"LAWNOTES_DIR": folder}, size=size)
+
+    def test_search_shows_the_match_at_40_and_100_columns(self):
+        for cols in (40, 100):
+            s = self.session(("Tort/Week 2 Duty of care.md", self.LINE + "\n"), size=(30, cols))
+            screen = s.keys(b"\x10duty", 0.8)
+            m = re.search(r"\S.{0,40}?:1   (.{0,%d})" % (cols - 12), screen)
+            self.assertTrue(m, screen)
+            row = m.group(0)[:cols - 2]
+            print(f"\n[search, {cols} columns] {row}")
+            self.assertIn("duty", row)
+            self.assertIn("Esc cancels", screen)
+            s.keys(b"\x1b", 0.4)
+            self.assertTrue(s.quit())
+
+    def test_todos_keep_the_todo_text_at_40_and_100_columns(self):
+        for cols in (40, 100):
+            s = self.session(("Tort/Week 2 Duty of care.md", "- [ ] read Robinson paras 21-30 carefully\n"),
+                             size=(30, cols))
+            screen = s.keys(b"\x1bj", 0.8)
+            m = re.search(r"read Robinson paras 21-30 carefully.{0,30}", screen)
+            self.assertTrue(m, screen)
+            print(f"\n[to-dos, {cols} columns] {m.group(0)[:cols - 2]}")
+            if cols == 100:
+                self.assertIn("carefully · Tort/Week 2 Duty of care", screen)
+            else:
+                self.assertNotIn("carefully · …", screen)
+            self.assertIn("Enter jumps", screen)
+            s.keys(b"\x1b", 0.4)
+            self.assertTrue(s.quit())
+
+    def test_footer_fits_and_names_the_verb_at_40_and_100_columns(self):
+        for cols, want in ((40, "Enter switches · Esc cancels"),
+                           (100, "type to filter · click or Enter switches · Esc cancels")):
+            s = self.session(("A.md", "x\n"), size=(30, cols))
+            screen = s.keys(b"\x1bt", 0.8)  # Option+T: themes
+            print(f"\n[themes footer, {cols} columns] {want}")
+            self.assertIn(want, screen)
+            s.keys(b"\x1b", 0.4)
+            self.assertTrue(s.quit())
 
 
 class ScanSpeedTests(unittest.TestCase):

@@ -497,6 +497,62 @@ NEVER_EXPAND = {
 ABBREV_ENDS = " .,;:!?)]}\"'\u201d\u2019"
 BULLET_RE = re.compile(r"^(\s*)([-*+]|\d+[.)]|>)(\s+)(\[[ xX]\]\s+)?")
 TODO_RE = re.compile(r"^\s*-\s+\[( )\](?=\s|$)")
+
+
+def shorten_note_name(rel, room):
+    """A note's path cut to `room` characters: the folder goes first ("…/Name.md"), then the name's end."""
+    if len(rel) <= room:
+        return rel
+    folder, _, name = rel.rpartition("/")
+    if folder and len(name) + 2 <= room:
+        return "…/" + name
+    name = name or rel
+    return name[:max(1, room - 1)] + "…"
+
+
+def search_row(rel, number, line, j, n, room):
+    """One ^P result in `room` columns: `name:line   text`, the text centred on the match at j (n long).
+    A narrow row shortens the name before it cuts the match."""
+    text = line.strip()
+    j = max(0, j - (len(line) - len(line.lstrip())))
+    wanted = min(n, 30) + 12  # the match and a little around it
+    tail = f":{number}   "
+    prefix = shorten_note_name(rel, max(8, room - len(tail) - min(wanted, len(text)))) + tail
+    avail = max(1, room - len(prefix))
+    if len(text) <= avail:
+        return prefix + text
+    a = max(0, min(j + n // 2 - avail // 2, len(text) - avail))
+    if n >= avail - 2:
+        a = j  # the match alone fills the row: start at it
+    end = a + avail
+    body = text[a:end]
+    if 0 < a < j:
+        body = "…" + body[1:]
+    if end < len(text) and end - 1 >= j + n:
+        body = body[:-1] + "…"
+    return prefix + body
+
+
+def todo_row(text, note, room):
+    """A to-do in `room` columns: the to-do is kept; the note name is cut first (not below 10
+    characters), then dropped, and only then is the to-do cut."""
+    free = room - len(text) - 3
+    if free >= len(note):
+        return f"{text} · {note}"
+    if free >= 10:
+        return f"{text} · …{note[-(free - 1):]}"
+    return text if len(text) <= room else text[:max(1, room - 1)] + "…"
+
+
+def pick_footer(verb, width):
+    """The list footer, dropping whole parts until it fits in `width`: never cut mid-word."""
+    verb += "es" if verb.endswith(("s", "x", "sh", "ch")) else "s"
+    for text in (f"type to filter · click or Enter {verb} · Esc cancels",
+                 f"type to filter · Enter {verb} · Esc cancels",
+                 f"Enter {verb} · Esc cancels", "Esc cancels", "Esc"):
+        if len(text) <= width:
+            return text
+    return ""
 BOLD_RE = re.compile(r"\*\*[^*]+\*\*")
 ITALIC_RE = re.compile(r"(?<![*\w])[*_][^*_\s][^*_]*[*_](?![*\w])")
 
@@ -2372,12 +2428,6 @@ HINTS = [("^G", "Help"), ("^S", "Save"), ("^O", "Open"), ("^P", "Search all"), (
 # ^G help screen: (key, description); key "#" marks a section heading, "" a plain line.
 HELP = [
     ("", "Law Notes is in beta: it's tested and your notes are plain Markdown files, but expect rough edges. If it ever closes unexpectedly, the reason is in iCloud Drive → Law Notes Logs."),
-    ("#", "Panes"),
-    ("Option+D", "Split side by side; Option+Shift+D splits one above the other. The new pane shows the note list: click a note or press Enter (Esc keeps the same note)."),
-    ("Option+O", "Next pane. Clicking a pane also switches to it."),
-    ("Option+W", "Close the pane (the note is saved first)."),
-    ("Drag", "Drag the line between side-by-side panes to resize them; for stacked panes, drag the upper pane's status bar."),
-    ("", "The same note in two panes stays in sync: both show your edits as you type."),
     ("#", "Notes and folders"),
     ("^O", "Open a note. Type to filter the list; click a note or press Enter to open it."),
     ("^N", "New note. Use Folder/Name to file it in a folder, e.g. Contract/Offer — the folder is created for you."),
@@ -2431,6 +2481,12 @@ HELP = [
     ("# Title", "Heading;  ## Section  for a subheading."),
     ("- item", "Bullet;  1. item  numbered;  - [ ] item  to-do;  > text  quote."),
     ("**bold**", "Bold;  *italic*  italic."),
+    ("#", "Panes"),
+    ("Option+D", "Split side by side; Option+Shift+D splits one above the other. The new pane shows the note list: click a note or press Enter (Esc keeps the same note)."),
+    ("Option+O", "Next pane. Clicking a pane also switches to it."),
+    ("Option+W", "Close the pane (the note is saved first)."),
+    ("Drag", "Drag the line between side-by-side panes to resize them; for stacked panes, drag the upper pane's status bar."),
+    ("", "The same note in two panes stays in sync: both show your edits as you type."),
     ("#", "Colours"),
     ("Option+T", "Themes: pick NERV (dark red), Unit-01 (purple and green), Paper (light), or one of yours. New theme copies the current one into a file you can change: save it and Law Notes updates straight away. F6 does the same."),
     ("", "Case names gold, citations like [1932] AC 562 pink, statutes like s 2(1) or Human Rights Act 1998 green, links to other notes underlined, **bold** white and *italic* pale blue (each theme has its own), misspelt words highlighted in red."),
@@ -2647,7 +2703,7 @@ class App:
             if self.theme not in THEMES:
                 items.append((f"  Edit “{self.theme}”", ("edit", self.theme)))
             return [it for it in items if query.lower() in it[0].lower()]
-        choice = self.pick("Themes", build, guide="Enter switches theme. Yours are in UCL Notes → .themes, so every Mac has them.")
+        choice = self.pick("Themes", build, guide="Yours are in UCL Notes → .themes, so every Mac has them.", enter="switch")
         if not choice:
             return
         action, name = choice
@@ -2902,9 +2958,9 @@ class App:
 
         choice = self.pick(f"Notes in {notes_location()}", build,
                            "No notes yet. Type a name and press Enter.",
-                           guide="New note or folder: type Folder/Name and press Enter, e.g. Contract/Offer "
+                           guide="New note or folder: type Folder/Name to make it, e.g. Contract/Offer "
                                  "makes the Contract folder (Contract/Offer/Postal rule nests deeper).",
-                           pane=pane)
+                           pane=pane, enter="open")
         if choice is None:
             return False
         action, arg = choice
@@ -3553,9 +3609,10 @@ class App:
             elif isinstance(k, str) and k.isprintable():
                 text += k
 
-    def pick(self, title, build, empty_hint="", guide="", pane=None, on_key=None):
+    def pick(self, title, build, empty_hint="", guide="", pane=None, on_key=None, enter="choose"):
         """Filterable list, full screen or inside a pane (the other panes stay in view).
-        build(query) -> [(label, value)]. Click an item or press Enter. Returns value or None."""
+        build(query) -> [(label, value)]. Click an item or press Enter. Returns value or None.
+        `enter` is the verb the footer gives for Enter (open, jump, export...); the guide must not repeat it."""
         query, sel, off, pressed_on = "", 0, 0, None
         while True:
             items = build(query)
@@ -3584,7 +3641,7 @@ class App:
             for r, (label, _) in enumerate(items[off:off + listh]):
                 attr = self.A["sel"] if off + r == sel else self.A["text"]
                 self.put(Y + top + r, X, (" " + label)[:W - 1].ljust(W - 1), attr)
-            self.put(Y + H - 1, X + 1, "type to filter · click or Enter to open · Esc cancel"[:W - 3], self.A["dim"])
+            self.put(Y + H - 1, X + 1, pick_footer(enter, W - 3), self.A["dim"])
             try:
                 curses.curs_set(1)
             except curses.error:
@@ -3811,7 +3868,7 @@ class App:
             return hits + ([(f"Replace with “{query}”", ("replace", query))] if query.strip() else [])
 
         context = line[max(0, a - 25):e + 25].strip()
-        choice = self.pick(f"Spelling: “{word}”  in  …{context}…", build, "Type the correct spelling and press Enter.")
+        choice = self.pick(f"Spelling: “{word}”  in  …{context}…", build, "Type the correct spelling and press Enter.", enter="choose")
         if not choice:
             return
         action, value = choice
@@ -3929,7 +3986,7 @@ class App:
             return "close"
 
         choice = self.pick(lambda: f"OSCOLA — {len(oscola_issues(b.lines))} slips", build,
-                           guide="Enter jumps · f fixes the selected slip · Esc closes", on_key=on_key)
+                           guide="f fixes the selected slip", on_key=on_key, enter="jump")
         if choice:
             self.goto(b.path, choice[0], choice[1])
 
@@ -3945,18 +4002,20 @@ class App:
             q = query.strip().lower()
             if len(q) < 2:
                 return []
+            room = (self.scr.getmaxyx()[1] - 2) if hasattr(self, "scr") else 1000  # the row is drawn after a space
             items = []
             for path, rel, lines in notes:
                 for i, line in enumerate(lines):
                     j = line.lower().find(q)
                     if j >= 0:
-                        items.append((f"{rel}:{i + 1}   {self.snippet(line, j, len(q))}", (path, i, j, query.strip())))
+                        items.append((search_row(rel, i + 1, line, j, len(q), room), (path, i, j, query.strip())))
                         if len(items) >= 400:
                             return items
             return items
 
         choice = self.pick(f"Search all notes ({len(notes)})", build,
-                           lambda q: "Type at least two letters." if len(q.strip()) < 2 else "No matches.")
+                           lambda q: "Type at least two letters." if len(q.strip()) < 2 else "No matches.",
+                           enter="jump")
         if choice:
             path, i, j, q = choice
             self.goto(path, i, j)
@@ -3987,12 +4046,7 @@ class App:
                 if not all(w in label.lower() for w in words):
                     continue
                 text, note = label.rsplit(" · ", 1)
-                if len(note) > width // 2:
-                    note = "…" + note[-(width // 2 - 1):]
-                room = max(1, width - len(note) - 3)
-                if len(text) > room:
-                    text = text[:room - 1] + "…"
-                items.append((f"{text} · {note}", value))
+                items.append((todo_row(text, note, width), value))
             return items
 
         def on_key(key, value):
@@ -4018,7 +4072,7 @@ class App:
             return True
 
         choice = self.pick(title, build, "No open to-dos here.",
-                           guide="Enter jumps to a to-do · x ticks it", on_key=on_key)
+                           guide="x ticks the selected to-do", on_key=on_key, enter="jump")
         if choice:
             path, _, i, _ = choice
             self.goto(path, i)
@@ -4112,7 +4166,7 @@ class App:
             choice = self.pick("Complete case", lambda q: [
                 (f"{c['name']} {c['best_cite']}".strip(), c) for c in matches
                 if q.lower() in (c["name"] + " " + c["best_cite"]).lower()][:10],
-                guide="Enter completes · Esc leaves the text")
+                guide="Cancelling leaves what you typed.", enter="complete")
             if not choice:
                 return True
         else:
@@ -4131,7 +4185,8 @@ class App:
             return [e for e in entries if all(w in e[0].lower() for w in words)]
 
         c = self.pick(f"Case index — {len(entries)} cases across all notes", build,
-                      "No cases found yet. Case names like  Donoghue v Stevenson  are picked up automatically.")
+                      "No cases found yet. Case names like  Donoghue v Stevenson  are picked up automatically.",
+                      enter="open")
         if not c:
             return
         open_lines = {os.path.realpath(b.path): b.lines for _, b in self.buffers()}
@@ -4147,7 +4202,7 @@ class App:
             items = [(f"{rel}:{i + 1}   {self.snippet(lines_by_path[path][i], j, n)}", h)
                      for h in hits for path, rel, i, j, n in [h]]
             hit = self.pick(f"{c['name']} — where it's mentioned", lambda q: [
-                it for it in items if q.lower() in it[0].lower()])
+                it for it in items if q.lower() in it[0].lower()], enter="jump")
             if not hit:
                 return
         else:
@@ -4181,7 +4236,8 @@ class App:
             items.append((f"{label}   · {len(queue) - new} due, {new} new, {len(mine)} cards", (name, mine, queue)))
         choice = self.pick("Revision cards — what to revise", lambda q: [
             it for it in items if q.lower() in it[0].lower()],
-            guide="Each case brief (^T) is a card, and so is a bullet that names a case and says something about it.")
+            guide="Each case brief (^T) is a card, and so is a bullet that names a case and says something about it.",
+            enter="revise")
         if not choice:
             return
         name, mine, queue = choice
@@ -4333,8 +4389,8 @@ class App:
         if not items:
             self.say("No earlier versions yet — snapshots are taken every few minutes while you work")
             return
-        choice = self.pick("Version history of this note — Enter restores (^Z undoes)", lambda q: [
-            it for it in items if q.lower() in it[0].lower()])
+        choice = self.pick("Version history of this note (^Z undoes a restore)", lambda q: [
+            it for it in items if q.lower() in it[0].lower()], enter="restore")
         if choice:
             lines, stamp = choice
             b.checkpoint("restore")
@@ -4393,7 +4449,7 @@ class App:
             items.append(("One at a time in this note — y replace, n skip, a all remaining, Esc stop", "review"))
         instead = f"“{repl}”" if repl else "nothing"
         choice = self.pick(f"Replace “{find}” with {instead}", lambda q: [
-            it for it in items if q.lower() in it[0].lower()])
+            it for it in items if q.lower() in it[0].lower()], enter="choose")
         if choice == "note":
             n = self.replace_in_view(find, repl)
             self.search = repl  # the replacements are highlighted; Esc clears
@@ -4522,8 +4578,8 @@ class App:
         summary = f"Replaced {done:,} in {changed} note{'s' * (changed != 1)}"
         self.say(summary + " · ^Z undoes it in an open note; ^R restores an earlier version of the others", 10)
         if problems:
-            path = self.pick(f"{summary} — {len(problems)} to check (Enter opens one)",
-                             lambda q: [it for it in problems if q.lower() in it[0].lower()])
+            path = self.pick(f"{summary} — {len(problems)} to check",
+                             lambda q: [it for it in problems if q.lower() in it[0].lower()], enter="open")
             if path:
                 self.goto(path, 0)
             self.say(f"{summary} · {len(problems)} to check", 10)
@@ -4612,13 +4668,13 @@ class App:
             return [e for e in entries if all(w in e[0].lower() for w in words)]
 
         target = self.pick("Outline — headings and cases in this note", build,
-                           "No headings or cases found yet.")
+                           "No headings or cases found yet.", enter="jump")
         if target:
             self.buf.cy, self.buf.cx = target
 
     def insert_template(self):
         choice = self.pick("Insert template", lambda q: [
-            (name, lines) for name, lines in TEMPLATES if q.lower() in name.lower()])
+            (name, lines) for name, lines in TEMPLATES if q.lower() in name.lower()], enter="insert")
         if not choice:
             return
         b = self.buf
@@ -4690,8 +4746,8 @@ class App:
             return items
 
         choice = self.pick("Link to a note", build, "No notes yet. Type a name to link to a note you'll write later.",
-                           guide="Enter writes the link, e.g. [[Tort/Negligence]]; add #Heading to go to a heading. "
-                                 "Esc leaves the [[ as typed.")
+                           guide="Writes the link, e.g. [[Tort/Negligence]]; add #Heading to go to a heading. "
+                                 "Cancelling leaves the [[ as typed.", enter="insert")
         if choice:
             self.buf.insert(choice + "]]", kind="link")
 
@@ -4718,7 +4774,7 @@ class App:
             return
         rel = found[0] if len(found) == 1 else self.pick(
             f"{len(found)} notes are called “{target}”: which one? (write [[Folder/{target}]] to say)",
-            lambda q: [(link_name(r), r) for r in found if q.lower() in r.lower()])
+            lambda q: [(link_name(r), r) for r in found if q.lower() in r.lower()], enter="open")
         if not rel:
             return
         path = os.path.join(NOTES_DIR, rel)
@@ -4763,7 +4819,8 @@ class App:
         count = len({it[1][0] for it in items})
         choice = self.pick(f"Notes linking here — {count} note{'s' * (count != 1)} link to {link_name(mine)}",
                            lambda q: [it for it in items if all(w in it[0].lower() for w in q.lower().split())],
-                           f"No notes link here yet. To link to this one, type [[ in another note and pick {link_name(mine)}.")
+                           f"No notes link here yet. To link to this one, type [[ in another note and pick {link_name(mine)}.",
+                           enter="open")
         if choice:
             self.goto(*choice)
 
@@ -4881,13 +4938,13 @@ class App:
         # At 40 columns a long folder is cut off the row, so the guide (which wraps) repeats it.
         guide = label if len(label) > 38 else ""
         choice = self.pick("Export this note — saved to " + EXPORT_DIR.replace(os.path.expanduser("~"), "~", 1),
-                           lambda q: [it for it in items if q.lower() in it[0].lower()], guide=guide)
+                           lambda q: [it for it in items if q.lower() in it[0].lower()], guide=guide, enter="export")
         if not choice:
             return
         notes = None
         if choice[0] == "pack":
             choice = self.pick(label, lambda q: [it for it in formats if q.lower() in it[0].lower()],
-                               guide="Word or PDF. “With tables” is one table of cases and one of legislation, for every note.")
+                               guide="Word or PDF. “With tables” is one table of cases and one of legislation, for every note.", enter="export")
             if not choice:
                 return
             notes = self.folder_notes(folder)

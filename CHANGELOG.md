@@ -8,6 +8,10 @@
 - `lawnotes --abbreviations` creates a new abbreviations file with the same header and defaults as Option+A.
 - README: commands in code blocks no longer carry `#` comments, which zsh passes to the command when pasted.
 - Tests wait for the editor to go quiet instead of for fixed times: the suite takes about a minute and a half instead of six.
+- Search all notes (^P) always shows the word you searched for: the line is centred on the match for the width of your window, and a long note name is shortened before the match is cut.
+- The to-do list (Option+J) keeps the to-do and shortens the note name first, instead of the other way round.
+- Each list's footer says what Enter does there (opens, jumps, exports, switches, restores...) and drops whole parts when the window is narrow, instead of cutting "Esc cancel" short.
+- The help screen (^G) now opens with Notes and folders, Writing and Searching; Panes and Colours come last.
 
 ## 1.6.0
 
