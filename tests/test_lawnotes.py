@@ -1552,6 +1552,16 @@ class Session:
         self.out += out
         return re.sub(rb"\x1b\[[0-9;?<>]*[A-Za-z~]|\x1b\(B|\x1b[=>]", b" ", out).decode(errors="replace")
 
+    def repaint(self, seconds=0.8):
+        """Make the editor draw the whole screen again (one row taller) and return that drawing.
+        Keys typed one at a time are drawn as small changes, never as a whole row, so a test that
+        reads a row after typing must ask for this first."""
+        import fcntl
+        import termios
+        rows, cols = struct.unpack("HHHH", fcntl.ioctl(self.fd, termios.TIOCGWINSZ, b"\0" * 8))[:2]
+        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows + 1, cols, 0, 0))
+        return self.keys(b"", seconds)
+
     def keys_until(self, data, expected, seconds=3):
         """Send keys, then keep reading until the expected screen text appears or time runs out."""
         out = self.keys(data, 0.1)
@@ -3764,7 +3774,8 @@ class ListRowTests(unittest.TestCase):
     def test_search_shows_the_match_at_40_and_100_columns(self):
         for cols in (40, 100):
             s = self.session(("Tort/Week 2 Duty of care.md", self.LINE + "\n"), size=(30, cols))
-            screen = s.keys(b"\x10duty", 0.8)
+            s.keys_until(b"\x10duty", "Filter: duty")
+            screen = s.repaint()
             m = re.search(r"\S.{0,40}?:1   (.{0,%d})" % (cols - 12), screen)
             self.assertTrue(m, screen)
             row = m.group(0)[:cols - 2]
