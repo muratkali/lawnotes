@@ -9,7 +9,9 @@ import random
 import tempfile
 import time
 import sys
+import subprocess
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_lawnotes import TMP, Session, lawnotes  # noqa: E402  (same temporary HOME and notes folder)
@@ -26,6 +28,46 @@ def fake_clipboard():
 
 
 class NoteNameTests(unittest.TestCase):
+    def test_hostile_recorded_folder_is_ignored_and_creates_nothing(self):
+        notesdir = lawnotes.notesdir
+        for n, content in enumerate([
+                b"", b"\n", b"   \n", b"relative/dir\n", b"./x\n", b"$HOME/x\n", b"/\n", b"~\n", b"/a\nb\n", b"/ok\r\n",
+                b"@HOME@/pwned\x1b[2J\n", b"@HOME@/pwned\x00evil\n", b"@HOME@/pwned\xc2\x9bX\n", b"\xff\xfe@HOME@/pwned\n",
+                b"@HOME@/pwned" + b"x" * 5000 + b"\n", b"@HOME@\n", b"@FILE@\n"]):
+            home = tempfile.mkdtemp(dir=TMP)
+            with open(os.path.join(home, "afile"), "w") as f:
+                f.write("a file is not a folder")
+            content = content.replace(b"@HOME@", home.encode()).replace(b"@FILE@", os.path.join(home, "afile").encode())
+            os.makedirs(os.path.join(home, ".config", "lawnotes"))
+            with open(os.path.join(home, ".config", "lawnotes", "notes_dir"), "wb") as f:
+                f.write(content)
+            before = sorted(os.listdir(home))
+            with patch.dict(os.environ, {"HOME": home}):
+                os.environ.pop("LAWNOTES_DIR", None)
+                self.assertEqual(notesdir.resolve(), (os.path.join(home, "Law Notes"), "default"), content[:30])
+                with self.assertRaises(ValueError):
+                    notesdir.record(content.decode("utf-8", "replace").rstrip("\n"))
+            self.assertEqual(sorted(os.listdir(home)), before, content[:30])  # nothing was created
+            self.assertEqual(open(os.path.join(home, ".config", "lawnotes", "notes_dir"), "rb").read(), content)
+            if n % 4 == 0:  # the self-test that gates every update still passes, and still creates nothing
+                r = subprocess.run([sys.executable, "-B", os.path.join(lawnotes.APP_DIR, "lawnotes.py"), "--self-test"],
+                                   env={**os.environ, "HOME": home, "LAWNOTES_DIR": ""}, capture_output=True, text=True,
+                                   timeout=120)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertFalse([name for name in os.listdir(home) if "pwned" in name or name == "Law Notes"])
+
+    def test_a_record_that_is_a_folder_or_a_pipe_is_ignored(self):
+        notesdir = lawnotes.notesdir
+        home = tempfile.mkdtemp(dir=TMP)
+        target = os.path.join(home, ".config", "lawnotes", "notes_dir")
+        os.makedirs(target)  # a folder where the file should be
+        with patch.dict(os.environ, {"HOME": home}):
+            os.environ.pop("LAWNOTES_DIR", None)
+            self.assertEqual(notesdir.resolve()[1], "default")
+            os.rmdir(target)
+            os.mkfifo(target)  # reading it would wait for ever
+            self.assertEqual(notesdir.resolve()[1], "default")
+
     def test_names_stay_inside_the_notes_folder(self):
         self.assertTrue(lawnotes.note_path("Tort/Duty").startswith(lawnotes.NOTES_DIR + os.sep))
         for bad in ("../../.ssh/config", "Tort/../../escape", "/../../etc/passwd", "a\x1b]52;c;x\x07"):

@@ -24,6 +24,9 @@ its own app and profile. If the switch fails, `current` goes back to where it wa
     update.py --switch TAG     switch to an already verified and tested version (internal)
     update.py --uninstall
     update.py --status
+
+The notes folder is decided by notesdir.py (shared with the editor and the `lawnotes` command).
+The installer records it in ~/.config/lawnotes/notes_dir; updates never touch notes folders.
 """
 import fcntl
 import json
@@ -34,6 +37,9 @@ import shutil
 import subprocess
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # notesdir.py sits beside this file
+import notesdir  # noqa: E402
 
 ROOT = os.path.expanduser(os.environ.get("LAWNOTES_HOME", "~/.local/share/lawnotes"))
 REPO = os.path.join(ROOT, "repo.git")
@@ -49,7 +55,7 @@ MESSAGE = os.path.join(CACHE, "update-message")
 LOCK = os.path.join(CACHE, "update.lock")
 APP = os.path.expanduser(os.environ.get("LAWNOTES_APP", "~/Applications/Law Notes.app"))
 BIN = os.path.expanduser("~/.local/bin/lawnotes")
-NOTES = os.path.expanduser(os.environ.get("LAWNOTES_DIR", "~/UCL/notes"))
+NOTES = notesdir.resolve()[0]  # the same answer as the editor and the `lawnotes` command (see notesdir.py)
 ICLOUD = os.path.expanduser("~/Library/Mobile Documents/com~apple~CloudDocs")
 BUNDLE_ID = "li.muratka.lawnotes"
 CHECK_EVERY = 24 * 3600
@@ -354,37 +360,68 @@ def count_notes(folder):
                if f.endswith((".md", ".txt")) and not f.startswith("."))
 
 
-def setup_notes():
-    icloud_notes = os.path.join(ICLOUD, "UCL Notes")
-    if not os.path.lexists(NOTES):
-        os.makedirs(os.path.dirname(NOTES), exist_ok=True)
-        if os.path.isdir(ICLOUD):
-            os.makedirs(icloud_notes, exist_ok=True)
-            os.symlink(icloud_notes, NOTES)
+def icloud_names():
+    """Folders the installer links to iCloud Drive when it has to create them. ~/UCL/notes is
+    only created again if someone asks for it with LAWNOTES_DIR."""
+    return {notesdir.default(): "Law Notes", notesdir.legacy(): "UCL Notes"}
+
+
+def choose_notes():
+    """(folder, whether to record it) for this install; writes nothing. LAWNOTES_DIR set while
+    installing is the choice and is recorded; an existing record or an existing ~/UCL/notes
+    stays exactly as it is (nothing recorded); iCloud Drive's "UCL Notes", if present on a new Mac,
+    means ~/UCL/notes linked to it (nothing recorded); otherwise the default is used and recorded."""
+    if os.environ.get("LAWNOTES_DIR"):
+        folder = notesdir.clean(os.environ["LAWNOTES_DIR"])
+        if not folder:
+            raise UpdateError("LAWNOTES_DIR must be a full folder path such as ~/Documents/Law Notes "
+                              "(no control characters; not your home folder, the disk's root or a file)")
+        return folder, True
+    folder, source = notesdir.resolve()
+    if source == "default" and os.path.isdir(os.path.join(ICLOUD, "UCL Notes")):
+        # A new Mac whose iCloud Drive already holds the UCL notes: link ~/UCL/notes to them, as the
+        # old installer did. Install time only; the editor never probes iCloud to find its folder.
+        return notesdir.legacy(), False
+    return folder, source == "default"
+
+
+def setup_notes(notes):
+    linked = icloud_names().get(notes)
+    if not os.path.lexists(notes):
+        os.makedirs(os.path.dirname(notes), exist_ok=True)
+        if linked and os.path.isdir(ICLOUD):
+            os.makedirs(os.path.join(ICLOUD, linked), exist_ok=True)
+            os.symlink(os.path.join(ICLOUD, linked), notes)
         else:
-            os.makedirs(NOTES)
-    real, icloud = os.path.realpath(NOTES), os.path.realpath(ICLOUD)  # compare resolved paths
+            os.makedirs(notes)
+    real, icloud = os.path.realpath(notes), os.path.realpath(ICLOUD)  # compare resolved paths
     in_icloud = real.startswith(icloud + os.sep)
     n = count_notes(real)
-    where = "iCloud Drive/" + os.path.relpath(real, icloud) if in_icloud else NOTES
-    say(f"Notes: {n} in {where.replace(os.path.expanduser('~'), '~')}")
+    home = os.path.expanduser("~")
+    where = "iCloud Drive/" + os.path.relpath(real, icloud) if in_icloud else notes
+    say(f"Notes: {n} in {where.replace(home, '~', 1)}")
     if in_icloud and n == 0:
-        print("    UCL Notes is empty on this Mac. If you have notes on another Mac, wait until Finder\n"
+        print(f"    {os.path.basename(real)} is empty on this Mac. If you have notes on another Mac, wait until Finder\n"
               "    shows iCloud Drive has finished syncing before writing, or you'll get duplicate notes.")
     elif not in_icloud and os.path.isdir(ICLOUD):
         print("    These notes are on this Mac only, not in iCloud Drive.")
     if in_icloud:
-        print("    Tip: in Finder, right-click iCloud Drive → UCL Notes → Keep Downloaded.")
+        print(f"    Tip: in Finder, right-click iCloud Drive → {os.path.relpath(real, icloud).replace(os.sep, ' → ')} → Keep Downloaded.")
+    print(f"    Your notes live in {notes.replace(home, '~', 1)}. To use another folder, run the installer again with\n"
+          "    LAWNOTES_DIR set to it (see the README); notes already there are not moved.")
 
 
 def install(tag):
     """First install, or repair (install.sh has already verified and staged the tag)."""
     os.makedirs(ROOT, exist_ok=True)
     state = load_state()
+    notes, remember = choose_notes()  # a bad LAWNOTES_DIR stops here, before anything is installed
     activate(tag, state)
     app_built = os.path.exists(os.path.join(APP, "Contents", "MacOS", "law-notes"))
     setup_path()
-    setup_notes()
+    if remember:
+        notesdir.record(notes)
+    setup_notes(notes)
     herdr = shutil.which("herdr", path=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:/usr/local/bin:"
                          + os.environ.get("PATH", ""))
     say(f"Installed Law Notes {tag} (beta)")
@@ -403,6 +440,8 @@ def uninstall():
     print("This removes the Law Notes app, the `lawnotes` command and its code:")
     print(f"    {APP}\n    {BIN}\n    {ROOT}\n    {SIGNERS}")
     print(f"Your notes ({NOTES}) and their history are NOT touched.")
+    if os.path.exists(notesdir.choice_file()):
+        print(f"Your choice of notes folder ({notesdir.choice_file()}) is kept, so a reinstall finds your notes.")
     if sys.stdin.isatty() and input("Remove Law Notes? [y/N] ").strip().lower() != "y":
         print("Nothing removed.")
         return

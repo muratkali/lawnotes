@@ -43,7 +43,15 @@ The installer installs the newest **signed release** and sets up:
 
 - **Law Notes.app** in `~/Applications`. Open it from Spotlight or the Dock: it opens one dedicated, dark red Law Notes window, or brings the open one forward.
 - the `lawnotes` command. Inside [herdr](https://herdr.dev) it opens a "Notes" tab; elsewhere it runs in the current terminal.
-- the notes folder `~/UCL/notes`, linked to **iCloud Drive → UCL Notes** when iCloud Drive is on, so every Mac signed in to the same Apple ID shares the same notes
+- the notes folder `~/Law Notes`, linked to **iCloud Drive → Law Notes** when iCloud Drive is on, so every Mac signed in to the same Apple ID shares the same notes. The installer does not ask: it prints where your notes will live.
+
+To keep your notes somewhere else, give the installer a full folder path by putting `LAWNOTES_DIR` on the `bash` side of the command (it is then remembered, for the editor, the `lawnotes` command and the updater alike):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/muratkali/lawnotes/main/install.sh | LAWNOTES_DIR="$HOME/Documents/Law Notes" bash
+```
+
+A custom folder is used as it is and is not linked to iCloud Drive. A Mac that already uses `~/UCL/notes` keeps using it, with nothing moved, and a new Mac whose iCloud Drive already has a **UCL Notes** folder gets `~/UCL/notes` linked to it, as before; run `lawnotes --where` to see which folder your copy uses. Running the installer again with `LAWNOTES_DIR` changes the folder for later runs but never moves notes.
 
 Only one copy of Law Notes runs at a time. Opening it again switches to the open copy (and opens the note you asked for there).
 
@@ -103,7 +111,7 @@ Option+C (or F7). Each case brief (^T) is a card, with the case and citation on 
 
 - Space shows the answer. Then press 1 for again, 2 for hard, 3 for good. Esc ends.
 - A card comes back after 1, 3, 7, 14, 30, then 60 days. Due cards come first, then new ones.
-- Progress is kept in UCL Notes, so every Mac shares it. Only numbered iCloud conflict copies are merged; other similarly named files are left alone.
+- Progress is kept in your notes folder, so every Mac shares it. Only numbered iCloud conflict copies are merged; other similarly named files are left alone.
 - If progress cannot be read, a rating is not saved and the status bar warns you.
 
 ## Updates, rollback, uninstall
@@ -120,14 +128,15 @@ lawnotes --uninstall
 - `--update` checks for a release now.
 - `--rollback` goes back to the previous version, and skips the one you left.
 - `--version` shows the installed version.
+- `--where` shows which folder your notes are in.
 - `--uninstall` removes the app and code. Your notes and their history stay.
 
 Set `LAWNOTES_NO_UPDATE=1` to turn off automatic updates.
 
 ## Your notes and their history
 
-- Notes live in iCloud Drive → UCL Notes, which syncs your Macs. iCloud isn't a backup, though: a deletion reaches every Mac. Turn on Time Machine as well.
-- In Finder, right-click UCL Notes and choose **Keep Downloaded**, so macOS never removes notes from the Mac to save space.
+- By default notes live in `~/Law Notes`, which is iCloud Drive → Law Notes when iCloud Drive is on, and that syncs your Macs. iCloud isn't a backup, though: a deletion reaches every Mac. Turn on Time Machine as well.
+- In Finder, right-click the Law Notes folder in iCloud Drive and choose **Keep Downloaded**, so macOS never removes notes from the Mac to save space.
 - Version history (^R) is kept on each Mac in `~/Library/Application Support/lawnotes/history.git`. Once a week a copy goes to iCloud Drive → Law Notes History, so ^R can also show versions saved on your other Macs.
 - Only `.md` and `.txt` files are kept in history. Keep lecture PDFs elsewhere, or they're simply not versioned.
 
@@ -135,7 +144,7 @@ Set `LAWNOTES_NO_UPDATE=1` to turn off automatic updates.
 
 Set these as environment variables:
 
-- `LAWNOTES_DIR` (default `~/UCL/notes`): where notes live
+- `LAWNOTES_DIR`: where notes live. Without it Law Notes uses the folder the installer recorded (in `~/.config/lawnotes/notes_dir`), else `~/UCL/notes` if that exists, else `~/Law Notes`. Set it when installing to choose a folder for good (see Install), or when starting Law Notes to use another folder for that run only.
 - `LAWNOTES_LANG` (default `en_GB`): spell-check language
 - `LAWNOTES_SPELL=0`: turn spell check off
 - `LAWNOTES_MOUSE=0`: turn mouse support off
